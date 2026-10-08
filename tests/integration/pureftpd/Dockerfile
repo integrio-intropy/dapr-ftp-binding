@@ -6,7 +6,7 @@
 #
 # Alpine's pure-ftpd reports "v1.0.51 [privsep]" with no [TLS] marker: it is
 # built WITHOUT TLS support, so the FTPS cases all use ProFTPD instead.
-FROM alpine:3.22
+FROM alpine:3.24
 
 RUN apk add --no-cache pure-ftpd
 

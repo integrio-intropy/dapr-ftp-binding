@@ -7,18 +7,19 @@ updates:
     groups:
       go-dependencies:
         patterns: ['*']
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
-  - package-ecosystem: docker
-    directories:
-      - /tests/integration/vsftpd
-      - /tests/integration/pureftpd
-      - /tests/integration/proftpd
-    schedule:
-      interval: weekly
+    groups:
+      docker:
+        patterns: ['*']
