@@ -17,6 +17,7 @@ services:
   ftp-plain:
     build: ./vsftpd
     container_name: dapr-ftp-plain
+    init: true
     ports:
       - "2121:21"
       - "30000-30009:30000-30009"
@@ -83,6 +84,7 @@ services:
   ftp-idle:
     build: ./vsftpd
     container_name: dapr-ftp-idle
+    init: true
     ports:
       - "2124:21"
       - "30040-30049:30040-30049"
