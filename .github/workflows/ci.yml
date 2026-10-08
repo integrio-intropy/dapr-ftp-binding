@@ -13,8 +13,8 @@ jobs:
     name: Build and unit test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.27'
           check-latest: true
@@ -26,11 +26,11 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.27'
-      - uses: golangci/golangci-lint-action@v8
+      - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.14.0
 
@@ -38,34 +38,64 @@ jobs:
     name: Integration
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.27'
       - name: Start FTP servers
-        run: docker compose -f tests/integration/docker-compose.yaml up -d --build
-      - name: Wait for the servers to accept connections
+        run: docker compose -f tests/integration/docker-compose.yaml up -d --build --wait
+      - name: Wait for the servers to answer FTP
         run: |
-          for port in 2121 2122 2123 2124 2125 9990; do
+          # A TCP accept is not readiness: docker-proxy binds the host port at
+          # container-create time, so `nc -z` succeeds even when the server
+          # inside is dead. Insist on the 220 greeting instead. Implicit-TLS
+          # 9990 sends no cleartext banner, so it only gets the TCP check.
+          for port in 2121 2122 2123 2124 2125; do
             for i in $(seq 1 30); do
-              if nc -z 127.0.0.1 "$port"; then break; fi
-              if [ "$i" = 30 ]; then echo "port $port never opened"; exit 1; fi
+              if printf 'QUIT\r\n' | timeout 5 nc 127.0.0.1 "$port" 2>/dev/null | grep -q '^220'; then
+                echo "port $port greeted"
+                break
+              fi
+              if [ "$i" = 30 ]; then
+                echo "::error::port $port never sent a 220 greeting"
+                exit 1
+              fi
               sleep 1
             done
+          done
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 9990; then echo "port 9990 open"; break; fi
+            if [ "$i" = 30 ]; then echo "::error::port 9990 never opened"; exit 1; fi
+            sleep 1
           done
       - run: go test -tags=integration -timeout 10m ./tests/integration/...
         env:
           FTP_INTEGRATION_REQUIRE_SERVERS: "1"
-      - name: Server logs on failure
+      - name: Server diagnostics on failure
         if: failure()
-        run: docker compose -f tests/integration/docker-compose.yaml logs
+        run: |
+          # The exit code is the discriminating datum when a server dies
+          # mid-run: vsftpd exits 2 on a bad config option, 139 on segfault,
+          # 137 when the kernel OOM-kills it. `logs` alone does not show it.
+          echo '--- compose ps (including exited) ---'
+          docker compose -f tests/integration/docker-compose.yaml ps -a
+          echo '--- exit codes and OOM status ---'
+          for c in $(docker compose -f tests/integration/docker-compose.yaml ps -aq); do
+            docker inspect "$c" \
+              --format '{{.Name}} state={{.State.Status}} exit={{.State.ExitCode}} oomkilled={{.State.OOMKilled}} restarts={{.RestartCount}} error={{.State.Error}}'
+          done
+          echo '--- host resource pressure ---'
+          free -m || true
+          echo "pids: $(ps -e --no-headers | wc -l) / $(cat /proc/sys/kernel/pid_max)"
+          echo '--- server logs ---'
+          docker compose -f tests/integration/docker-compose.yaml logs --no-color
 
   security:
     name: Vulnerabilities and licences
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.27'
       - name: govulncheck
@@ -90,11 +120,15 @@ jobs:
     name: Container image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
         with:
           context: .
           push: false
           platforms: linux/amd64,linux/arm64
           tags: dapr-ftp-binding:ci
+          # The Dockerfile cross-compiles rather than emulating, so the only
+          # thing left worth caching between runs is the layer graph.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

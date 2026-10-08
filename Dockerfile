@@ -1,21 +1,25 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.27-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
 
 ARG VERSION=dev
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 
-# Dependencies first, so edits to source do not invalidate the module cache.
 COPY go.mod go.sum ./
-RUN go mod download && go mod verify
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    go mod download && go mod verify
 
 COPY . .
-RUN CGO_ENABLED=0 go build \
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
       -trimpath \
       -ldflags="-s -w -X main.version=${VERSION}" \
       -o /out/ftp-binding ./cmd/ftp-binding
 
-FROM alpine:3.22
+FROM alpine:3.24
 
 ARG VERSION=dev
 

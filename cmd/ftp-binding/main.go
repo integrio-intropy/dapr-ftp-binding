@@ -1,3 +1,5 @@
+// Package main hosts the FTP and FTPS output binding as a Dapr pluggable
+// component, registering it with the sidecar over a Unix domain socket.
 package main
 
 import (
