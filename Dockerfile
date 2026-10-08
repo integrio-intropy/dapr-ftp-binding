@@ -15,7 +15,7 @@ RUN CGO_ENABLED=0 go build \
       -ldflags="-s -w -X main.version=${VERSION}" \
       -o /out/ftp-binding ./cmd/ftp-binding
 
-FROM alpine:3.22
+FROM alpine:3.24
 
 ARG VERSION=dev
 
