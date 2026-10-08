@@ -1,0 +1,93 @@
+# FTP test servers for the integration suite.
+#
+# Two things drive the shape of this file:
+#
+# 1. Passive-mode ports CANNOT be randomised. The server advertises a port that
+#    the client must then reach, so the published range has to match the
+#    configured range exactly. Hence fixed ports rather than testcontainers'
+#    default random mapping.
+#
+# 2. The images are built from alpine rather than pulled. Popular FTP images are
+#    amd64-only and pure-ftpd dies under Rosetta on arm64 with
+#    "rosetta error: mmap_anonymous_rw mmap failed" as soon as it forks per
+#    connection. Building natively keeps the suite working on Apple Silicon and
+#    on x86 CI alike.
+services:
+  # Plain FTP.
+  ftp-plain:
+    build: ./vsftpd
+    container_name: dapr-ftp-plain
+    ports:
+      - "2121:21"
+      - "30000-30009:30000-30009"
+    environment:
+      MODE: plain
+      PASV_MIN: "30000"
+      PASV_MAX: "30009"
+
+  # The same four operations against a second FTP implementation, so the binding
+  # is not accidentally written against vsftpd's quirks. Alpine's pure-ftpd has
+  # no TLS support, so this covers plain FTP only.
+  ftp-pureftpd:
+    build: ./pureftpd
+    container_name: dapr-ftp-pureftpd
+    ports:
+      - "2122:21"
+      - "30010-30019:30010-30019"
+    environment:
+      PASV_MIN: "30010"
+      PASV_MAX: "30019"
+
+  # Explicit FTPS (AUTH TLS). ProFTPD rather than vsftpd; see proftpd/Dockerfile.
+  ftps-explicit:
+    build: ./proftpd
+    container_name: dapr-ftps-explicit
+    ports:
+      - "2123:21"
+      - "30050-30059:30050-30059"
+    environment:
+      MODE: explicit
+      PASV_MIN: "30050"
+      PASV_MAX: "30059"
+
+  # Implicit FTPS needs its own listener on 990 and cannot share one with
+  # explicit, so it is a separate container.
+  ftps-implicit:
+    build: ./proftpd
+    container_name: dapr-ftps-implicit
+    ports:
+      - "9990:990"
+      - "30020-30029:30020-30029"
+    environment:
+      MODE: implicit
+      LISTEN_PORT: "990"
+      PASV_MIN: "30020"
+      PASV_MAX: "30029"
+
+  # Same as ftps-explicit but demanding that the data connection resume the
+  # control connection's TLS session, which Go only does when the tls.Config
+  # carries a ClientSessionCache. Proves the per-session cache works.
+  ftps-reuse:
+    build: ./proftpd
+    container_name: dapr-ftps-reuse
+    ports:
+      - "2125:21"
+      - "30030-30039:30030-30039"
+    environment:
+      MODE: explicit
+      PASV_MIN: "30030"
+      PASV_MAX: "30039"
+      REQUIRE_SSL_REUSE: "YES"
+
+  # A short idle timeout, for exercising stale-connection recovery quickly.
+  ftp-idle:
+    build: ./vsftpd
+    container_name: dapr-ftp-idle
+    ports:
+      - "2124:21"
+      - "30040-30049:30040-30049"
+    environment:
+      MODE: plain
+      PASV_MIN: "30040"
+      PASV_MAX: "30049"
+      IDLE_TIMEOUT: "5"

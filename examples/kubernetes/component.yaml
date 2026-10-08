@@ -1,0 +1,43 @@
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: ftp
+  annotations:
+    # Dapr 1.11+ can inject this container into pods that set
+    # dapr.io/inject-pluggable-components: "true", so it doesn't have to be
+    # added to each Deployment's container list by hand.
+    dapr.io/component-container: >
+      {
+        "name": "ftp-binding",
+        "image": "harbor.intropy.io/platform/dapr-ftp-binding:v0.1.0",
+        "volumeMounts": [
+          { "name": "dapr-unix-domain-socket", "mountPath": "/tmp/dapr-components-sockets" }
+        ],
+        "resources": {
+          "requests": { "cpu": "10m", "memory": "32Mi" },
+          "limits": { "memory": "128Mi" }
+        },
+        "securityContext": {
+          "runAsNonRoot": true,
+          "allowPrivilegeEscalation": false,
+          "readOnlyRootFilesystem": true,
+          "capabilities": { "drop": ["ALL"] },
+          "seccompProfile": { "type": "RuntimeDefault" }
+        }
+      }
+spec:
+  type: bindings.ftp
+  version: v1
+  metadata:
+    - name: address
+      value: "ftp.example.com:21"
+    - name: username
+      value: "ftpuser"
+    - name: password
+      secretKeyRef:
+        name: ftp-credentials
+        key: password
+    - name: rootPath
+      value: "/upload"
+    - name: tlsMode
+      value: "explicit"

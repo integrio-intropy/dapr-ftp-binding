@@ -1,0 +1,30 @@
+version: "2"
+run:
+  timeout: 5m
+  build-tags:
+    - integration
+linters:
+  enable:
+    - bodyclose
+    - errorlint
+    - gosec
+    - misspell
+    - nilerr
+    - revive
+    - unconvert
+    - unparam
+  settings:
+    gosec:
+      excludes:
+        # G402 is handled deliberately: InsecureSkipVerify is opt-in via
+        # component metadata and warns at startup.
+        - G402
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - unparam
+formatters:
+  enable:
+    - gofmt

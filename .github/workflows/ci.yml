@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and unit test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          check-latest: true
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race -coverprofile=coverage.out ./...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.14.0
+
+  integration:
+    name: Integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+      - name: Start FTP servers
+        run: docker compose -f tests/integration/docker-compose.yaml up -d --build
+      - name: Wait for the servers to accept connections
+        run: |
+          for port in 2121 2122 2123 2124 2125 9990; do
+            for i in $(seq 1 30); do
+              if nc -z 127.0.0.1 "$port"; then break; fi
+              if [ "$i" = 30 ]; then echo "port $port never opened"; exit 1; fi
+              sleep 1
+            done
+          done
+      - run: go test -tags=integration -timeout 10m ./tests/integration/...
+        env:
+          FTP_INTEGRATION_REQUIRE_SERVERS: "1"
+      - name: Server logs on failure
+        if: failure()
+        run: docker compose -f tests/integration/docker-compose.yaml logs
+
+  security:
+    name: Vulnerabilities and licences
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck -format openvex ./... > vex.json || true
+          govulncheck ./... > vuln.txt 2>&1 || true
+          cat vuln.txt
+          unexpected=$(grep -oE 'GO-[0-9]{4}-[0-9]+' vuln.txt | sort -u \
+            | grep -vxF -f <(grep -oE 'GO-[0-9]{4}-[0-9]+' .govulncheck-allow.md | sort -u) || true)
+          if [ -n "$unexpected" ]; then
+            echo "::error::unaccepted vulnerabilities: $unexpected"
+            exit 1
+          fi
+          echo "only accepted findings present"
+      - name: Licence scan
+        run: |
+          go install github.com/google/go-licenses@latest
+          go-licenses check ./... --disallowed_types=forbidden,restricted
+
+  docker:
+    name: Container image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          platforms: linux/amd64,linux/arm64
+          tags: dapr-ftp-binding:ci

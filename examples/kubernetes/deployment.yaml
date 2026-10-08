@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ftp-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ftp-demo
+  template:
+    metadata:
+      labels:
+        app: ftp-demo
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "ftp-demo"
+        dapr.io/app-port: "8080"
+        # Required for the component container to be injected automatically.
+        dapr.io/inject-pluggable-components: "true"
+    spec:
+      containers:
+        - name: app
+          image: your-registry/your-app:latest
+          ports:
+            - containerPort: 8080

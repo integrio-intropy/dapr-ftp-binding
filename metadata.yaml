@@ -1,0 +1,88 @@
+# Component metadata manifest, following the components-contrib convention.
+schemaVersion: v1
+type: bindings
+name: ftp
+version: v1
+status: alpha
+title: "FTP/FTPS"
+urls:
+  - title: Reference
+    url: https://github.com/integrio-intropy/dapr-ftp-binding
+binding:
+  output: true
+  input: false
+  operations:
+    - name: create
+      description: "Upload the request data to fileName."
+    - name: get
+      description: "Download fileName and return it as the response data."
+    - name: list
+      description: "List the directory given in fileName, defaulting to rootPath."
+    - name: delete
+      description: "Delete fileName."
+metadata:
+  - name: address
+    required: true
+    description: "FTP server address in host:port form."
+    example: '"ftp.example.com:21"'
+    type: string
+  - name: username
+    required: false
+    description: "Username for authentication. Defaults to anonymous."
+    example: '"ftpuser"'
+    type: string
+  - name: password
+    required: false
+    sensitive: true
+    description: "Password for authentication."
+    example: '"*****"'
+    type: string
+  - name: rootPath
+    required: true
+    description: >
+      Working directory. fileName is joined to it. This is not a security
+      boundary: the FTP server must restrict the account.
+    example: '"/upload"'
+    type: string
+  - name: tlsMode
+    required: false
+    description: "none, explicit (AUTH TLS) or implicit (TLS from connect)."
+    example: '"explicit"'
+    default: '"none"'
+    type: string
+  - name: insecureSkipVerify
+    required: false
+    description: "Disable certificate verification."
+    example: '"false"'
+    default: '"false"'
+    type: bool
+  - name: timeout
+    required: false
+    description: >
+      Bound on connecting and logging in, and on waiting for a free pooled
+      connection. Requires a unit suffix.
+    example: '"30s"'
+    default: '"30s"'
+    type: duration
+  - name: disableEPSV
+    required: false
+    description: "Disable extended passive mode."
+    example: '"false"'
+    default: '"false"'
+    type: bool
+  - name: trustPASVIP
+    required: false
+    description: >
+      Use the server's advertised PASV address. Usually required behind NAT or
+      in Docker, where the advertised address is unroutable.
+    example: '"false"'
+    default: '"false"'
+    type: bool
+  - name: maxConnections
+    required: false
+    description: >
+      Maximum concurrent FTP sessions, per component instance. Keep below the
+      server's per-user login cap.
+    example: '"5"'
+    default: '"5"'
+    type: number

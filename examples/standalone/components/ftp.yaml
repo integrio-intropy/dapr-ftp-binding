@@ -1,0 +1,29 @@
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: ftp
+spec:
+  # The socket file name (ftp.sock) is what makes this bindings.ftp.
+  type: bindings.ftp
+  version: v1
+  metadata:
+    - name: address
+      value: "localhost:2121"
+    - name: username
+      value: "ftpuser"
+    # In production use a secret reference rather than a literal:
+    #   secretKeyRef:
+    #     name: ftp-credentials
+    #     key: password
+    - name: password
+      value: "ftppass"
+    # Required. fileName is joined to this path
+    - name: rootPath
+      value: "/upload"
+    # none | explicit | implicit. Certificate verification is on by default.
+    - name: tlsMode
+      value: "none"
+    - name: timeout
+      value: "30s"
+    - name: maxConnections
+      value: "5"
