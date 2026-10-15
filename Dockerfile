@@ -31,18 +31,21 @@ LABEL org.opencontainers.image.title="dapr-ftp-binding" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="${VERSION}"
 
+ARG UID=65532
+ARG GID=65532
+
 # Certificates are needed to verify FTPS servers
 RUN apk add --no-cache ca-certificates \
- && addgroup -S app \
- && adduser -S -G app app \
+ && addgroup -S -g ${GID} app \
+ && adduser -S -u ${UID} -G app app \
  && mkdir -p /tmp/dapr-components-sockets \
- && chown app:app /tmp/dapr-components-sockets
+ && chown ${UID}:${GID} /tmp/dapr-components-sockets
 
-COPY --from=builder --chown=app:app /out/ftp-binding /usr/local/bin/ftp-binding
+COPY --from=builder --chown=${UID}:${GID} /out/ftp-binding /usr/local/bin/ftp-binding
 
 COPY LICENSE NOTICE THIRD_PARTY_LICENSES /usr/local/share/doc/dapr-ftp-binding/
 
-USER app
+USER ${UID}:${GID}
 
 ENV DAPR_COMPONENTS_SOCKETS_FOLDER=/tmp/dapr-components-sockets
 
