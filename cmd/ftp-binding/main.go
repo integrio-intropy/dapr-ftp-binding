@@ -68,6 +68,7 @@ func main() {
 		socketPerm  = flag.String("socket-perm", "0660", "permission bits for the socket file, in octal")
 		maxMsgSize  = flag.Int("max-message-size", defaultMaxMessageSize, "maximum gRPC message size in bytes; raise alongside the sidecar's --max-body-size")
 		logLevel    = flag.String("log-level", "info", "log level: debug, info, warn or error")
+		exitIdle    = flag.Duration("exit-when-idle", 0, "exit once the sidecar has connected and then stayed disconnected for this long; for Job and CronJob pods, where a component left running keeps the Job from completing. Leave at 0 for Deployments")
 		showVersion = flag.Bool("version", false, "print the version and exit")
 	)
 	flag.Parse()
@@ -97,7 +98,7 @@ func main() {
 		log.Fatalf("invalid -socket-perm: %v", err)
 	}
 
-	if err := run(log, *socketName, perm, *maxMsgSize); err != nil {
+	if err := run(log, *socketName, perm, *maxMsgSize, *exitIdle); err != nil {
 		log.Fatalf("ftp binding failed: %v", err)
 	}
 }
@@ -117,7 +118,7 @@ func parsePerm(s string) (os.FileMode, error) {
 	return os.FileMode(n), nil
 }
 
-func run(log logger.Logger, socketName string, perm os.FileMode, maxMsgSize int) error {
+func run(log logger.Logger, socketName string, perm os.FileMode, maxMsgSize int, exitWhenIdle time.Duration) error {
 	socketPath := filepath.Join(socketFolder(), socketName+".sock")
 
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0o750); err != nil {
@@ -155,10 +156,16 @@ func run(log logger.Logger, socketName string, perm os.FileMode, maxMsgSize int)
 		log.Warnf("could not set permissions on %s: %v", socketPath, err)
 	}
 
-	server := grpc.NewServer(
+	serverOpts := []grpc.ServerOption{
 		grpc.MaxRecvMsgSize(maxMsgSize),
 		grpc.MaxSendMsgSize(maxMsgSize),
-	)
+	}
+	idle := newIdleWatcher(exitWhenIdle)
+	if idle != nil {
+		serverOpts = append(serverOpts, grpc.StatsHandler(idle))
+		log.Infof("will exit %s after the sidecar disconnects", exitWhenIdle)
+	}
+	server := grpc.NewServer(serverOpts...)
 
 	reg := newRegistry(log)
 	sdkbindings.RegisterOutput(server, reg.get)
@@ -185,6 +192,10 @@ func run(log logger.Logger, socketName string, perm os.FileMode, maxMsgSize int)
 		return err
 	case s := <-sig:
 		log.Infof("received %s, shutting down", s)
+	case <-idle.Fired():
+		// Exit 0: under restartPolicy: Never a container that exits non-zero
+		// puts the whole pod into Failed, and the Job with it.
+		log.Infof("no sidecar connection for %s, shutting down so the pod can complete", exitWhenIdle)
 	}
 
 	// Stop accepting work, then close every pool so the FTP server sees a

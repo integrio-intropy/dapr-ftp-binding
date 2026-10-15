@@ -124,6 +124,7 @@ the process itself is hosted.
 | `-socket-perm` | `0660` | Permission bits for the socket, **read as octal** whether or not you write the leading zero. |
 | `-max-message-size` | `5242880` | Maximum gRPC message in bytes. Raise alongside the sidecar's `--max-body-size`; |
 | `-log-level` | `info` | `debug`, `info`, `warn` or `error`. |
+| `-exit-when-idle` | `0` (off) | Exit once the sidecar has connected and then stayed disconnected for this long. For Jobs and CronJobs; see the Kubernetes example. Leave off for Deployments. |
 | `-version` | | Print the version and exit. |
 
 
