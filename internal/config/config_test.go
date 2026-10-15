@@ -192,3 +192,67 @@ func hasWarning(warns []string, sub string) bool {
 	}
 	return false
 }
+
+// --- tempFileNamePattern ------------------------------------------------
+
+// Off by default: create stays a single STOR, so existing deployments are
+// unaffected and nobody has to establish that their server does RNFR/RNTO.
+func TestTempFileNamePatternDefaultsToOff(t *testing.T) {
+	cfg, _, err := Parse(base())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.TempFileNamePattern != "" {
+		t.Errorf("TempFileNamePattern = %q, want empty", cfg.TempFileNamePattern)
+	}
+	if got := cfg.TempPath("/upload/a.txt"); got != "/upload/a.txt" {
+		t.Errorf("TempPath = %q, want the final path unchanged", got)
+	}
+}
+
+func TestTempFileNamePatternAccepted(t *testing.T) {
+	for _, tc := range []struct {
+		pattern string
+		path    string
+		want    string
+	}{
+		{"{name}.tmp", "/upload/a.txt", "/upload/a.txt.tmp"},
+		{".{name}", "/upload/a.txt", "/upload/.a.txt"},
+		{".{name}", "/upload/sub/a.txt", "/upload/sub/.a.txt"},
+		{"  {name}.part  ", "/upload/a.txt", "/upload/a.txt.part"},
+		{"{name}.{name}", "/upload/a.txt", "/upload/a.txt.a.txt"},
+	} {
+		props := base()
+		props["tempFileNamePattern"] = tc.pattern
+		cfg, _, err := Parse(props)
+		if err != nil {
+			t.Fatalf("pattern %q: unexpected error: %v", tc.pattern, err)
+		}
+		if got := cfg.TempPath(tc.path); got != tc.want {
+			t.Errorf("pattern %q: TempPath(%q) = %q, want %q", tc.pattern, tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestTempFileNamePatternRejected(t *testing.T) {
+	for _, tc := range []struct{ pattern, wantIn string }{
+		{"tmp", "must contain {name}"},
+		{"{name}", "final name itself"},
+		{"tmp/{name}", "path separator"},
+		{`tmp\{name}`, "path separator"},
+	} {
+		props := base()
+		props["tempFileNamePattern"] = tc.pattern
+		_, _, err := Parse(props)
+		if err == nil {
+			t.Fatalf("pattern %q was accepted", tc.pattern)
+		}
+		if !strings.Contains(err.Error(), tc.wantIn) {
+			t.Errorf("pattern %q: error %q is missing %q", tc.pattern, err, tc.wantIn)
+		}
+		// The operator sees only this sentence, so it must show what they wrote.
+		if !strings.Contains(err.Error(), "tempFileNamePattern") {
+			t.Errorf("pattern %q: error %q does not name the field", tc.pattern, err)
+		}
+	}
+}

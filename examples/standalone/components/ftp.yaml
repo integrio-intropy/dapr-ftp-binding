@@ -27,3 +27,9 @@ spec:
       value: "30s"
     - name: maxConnections
       value: "5"
+    # Optional, off by default. Upload to "<name>.tmp" and rename it onto the
+    # requested name, so a partner polling this folder never picks up a file
+    # mid-upload. Needs a server that supports RNFR/RNTO -- most do, but it is
+    # not required by RFC 959 and FEAT does not advertise it, so confirm first.
+    # - name: tempFileNamePattern
+    #   value: "{name}.tmp"

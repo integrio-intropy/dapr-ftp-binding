@@ -49,6 +49,10 @@ type Backend struct {
 	// FailRetrieveClose simulates a server reporting a transfer failure only
 	// after the data stream ends, which is the bug upstream shipped.
 	FailRetrieveClose bool
+	// RenameRefusesOverwrite models the minority of servers that answer 553 to
+	// an RNTO onto an existing name instead of replacing it. RFC 959 does not
+	// say which is correct, so both behaviours have to be exercised.
+	RenameRefusesOverwrite bool
 
 	dials        atomic.Int64
 	liveSessions atomic.Int64
@@ -74,6 +78,17 @@ func (b *Backend) Get(p string) ([]byte, bool) {
 	defer b.mu.Unlock()
 	d, ok := b.files[p]
 	return append([]byte(nil), d...), ok
+}
+
+// Rename moves a file behind the sessions' backs, for tests that need the
+// server to have done work the client never learned about.
+func (b *Backend) Rename(from, to string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if data, ok := b.files[from]; ok {
+		b.files[to] = data
+		delete(b.files, from)
+	}
 }
 
 // Paths returns every stored path, sorted.
@@ -254,6 +269,27 @@ func (c *conn) Delete(ctx context.Context, p string) error {
 		return &textproto.Error{Code: ftperr.CodeFileUnavailable, Msg: "No such file or directory"}
 	}
 	delete(c.b.files, p)
+	return nil
+}
+
+// Rename models the common POSIX-backed server: it replaces an existing
+// target, unless the backend is configured to refuse.
+func (c *conn) Rename(ctx context.Context, from, to string) error {
+	if err := c.enter(ctx, "rename", from); err != nil {
+		return err
+	}
+	defer c.exit()
+	c.b.mu.Lock()
+	defer c.b.mu.Unlock()
+	data, ok := c.b.files[from]
+	if !ok {
+		return &textproto.Error{Code: ftperr.CodeFileUnavailable, Msg: "No such file or directory"}
+	}
+	if _, exists := c.b.files[to]; exists && c.b.RenameRefusesOverwrite {
+		return &textproto.Error{Code: ftperr.CodeNameNotAllowed, Msg: "File already exists"}
+	}
+	c.b.files[to] = data
+	delete(c.b.files, from)
 	return nil
 }
 

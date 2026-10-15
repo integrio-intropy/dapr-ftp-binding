@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/textproto"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/dapr/components-contrib/bindings"
@@ -338,5 +340,186 @@ func TestReinitClosesPreviousPool(t *testing.T) {
 	}
 	if live := backend.LiveSessions(); live != 0 {
 		t.Fatalf("%d sessions still open after Close; the pool from the first Init was never closed", live)
+	}
+}
+
+// --- tempFileNamePattern ------------------------------------------------
+
+// recordOps returns a FailNext spy that appends "op path" to ops and never
+// fails, which is the cheapest way to assert the order of the wire operations.
+func recordOps(backend *fake.Backend, ops *[]string) {
+	var mu sync.Mutex
+	backend.FailNext = func(op, p string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		*ops = append(*ops, op+" "+p)
+		return nil
+	}
+}
+
+// The default is off, so create stays a single STOR to the final name. This is
+// the regression guard for every deployment that does not set the pattern.
+func TestCreateWithoutTempPatternStoresDirectly(t *testing.T) {
+	backend := fake.NewBackend()
+	b := newBinding(t, backend, nil)
+	var ops []string
+	recordOps(backend, &ops)
+
+	if _, err := invoke(t, b, bindings.CreateOperation, []byte("hello"), map[string]string{"fileName": "a.txt"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if want := []string{"store /upload/a.txt"}; !slices.Equal(ops, want) {
+		t.Errorf("ops = %v, want %v", ops, want)
+	}
+}
+
+func TestCreateWritesTempThenRenames(t *testing.T) {
+	backend := fake.NewBackend()
+	b := newBinding(t, backend, map[string]string{"tempFileNamePattern": "{name}.tmp"})
+	var ops []string
+	recordOps(backend, &ops)
+
+	resp, err := invoke(t, b, bindings.CreateOperation, []byte("hello"), map[string]string{"fileName": "a.txt"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	want := []string{"store /upload/a.txt.tmp", "rename /upload/a.txt.tmp"}
+	if !slices.Equal(ops, want) {
+		t.Errorf("ops = %v, want %v", ops, want)
+	}
+	if got, ok := backend.Get("/upload/a.txt"); !ok || string(got) != "hello" {
+		t.Errorf("stored = %q (ok=%v), want hello", got, ok)
+	}
+	if paths := backend.Paths(); !slices.Equal(paths, []string{"/upload/a.txt"}) {
+		t.Errorf("paths = %v, want only the final name with no temp left", paths)
+	}
+	// The caller is told the name it asked for, never the temp one.
+	if resp.Metadata["fileName"] != "/upload/a.txt" {
+		t.Errorf("response metadata fileName = %q", resp.Metadata["fileName"])
+	}
+}
+
+func TestCreateCustomTempPattern(t *testing.T) {
+	backend := fake.NewBackend()
+	b := newBinding(t, backend, map[string]string{"tempFileNamePattern": ".{name}"})
+	var ops []string
+	recordOps(backend, &ops)
+
+	if _, err := invoke(t, b, bindings.CreateOperation, []byte("x"), map[string]string{"fileName": "sub/a.txt"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// The temp name stays in the final file's own directory.
+	if want := []string{"store /upload/sub/.a.txt", "rename /upload/sub/.a.txt"}; !slices.Equal(ops, want) {
+		t.Errorf("ops = %v, want %v", ops, want)
+	}
+	if paths := backend.Paths(); !slices.Equal(paths, []string{"/upload/sub/a.txt"}) {
+		t.Errorf("paths = %v", paths)
+	}
+}
+
+// A temp file left behind by an earlier crashed attempt is simply overwritten:
+// STOR replaces, so unlike the SMB binding there is no state that blocks the
+// next create of the same name.
+func TestCreateOverwritesALeftoverTempFile(t *testing.T) {
+	backend := fake.NewBackend()
+	backend.Put("/upload/a.txt.tmp", []byte("partial junk from a crashed run"))
+	b := newBinding(t, backend, map[string]string{"tempFileNamePattern": "{name}.tmp"})
+
+	if _, err := invoke(t, b, bindings.CreateOperation, []byte("hello"), map[string]string{"fileName": "a.txt"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if got, _ := backend.Get("/upload/a.txt"); string(got) != "hello" {
+		t.Errorf("stored = %q, want hello", got)
+	}
+	if paths := backend.Paths(); !slices.Equal(paths, []string{"/upload/a.txt"}) {
+		t.Errorf("paths = %v, want the leftover temp consumed", paths)
+	}
+}
+
+// A failed rename must surface the name the caller asked for -- not the temp
+// name, which means nothing to them -- and must not leave the temp behind.
+func TestCreateCleansUpTheTempFileWhenRenameFails(t *testing.T) {
+	backend := fake.NewBackend()
+	b := newBinding(t, backend, map[string]string{"tempFileNamePattern": "{name}.tmp"})
+	backend.FailNext = func(op, _ string) error {
+		if op == "rename" {
+			return &textproto.Error{Code: ftperr.CodeFileUnavailable, Msg: "Permission denied"}
+		}
+		return nil
+	}
+
+	_, err := invoke(t, b, bindings.CreateOperation, []byte("hello"), map[string]string{"fileName": "a.txt"})
+	if err == nil {
+		t.Fatal("expected the rename failure to surface")
+	}
+	for _, want := range []string{"create", "/upload/a.txt", "Permission denied"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q is missing %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), ".tmp") {
+		t.Errorf("error %q names the temp file; the caller asked for the final name", err)
+	}
+	if paths := backend.Paths(); len(paths) != 0 {
+		t.Errorf("paths = %v, want the temp file cleaned up", paths)
+	}
+}
+
+// A server that refuses RNTO onto an existing name (553) is a command-level
+// refusal: it is the server's answer, so it is reported rather than retried,
+// and the temp file is cleaned up.
+func TestCreateSurfacesARefusedOverwrite(t *testing.T) {
+	backend := fake.NewBackend()
+	backend.RenameRefusesOverwrite = true
+	backend.Put("/upload/a.txt", []byte("existing"))
+	b := newBinding(t, backend, map[string]string{"tempFileNamePattern": "{name}.tmp"})
+
+	_, err := invoke(t, b, bindings.CreateOperation, []byte("hello"), map[string]string{"fileName": "a.txt"})
+	if err == nil {
+		t.Fatal("expected the 553 to surface")
+	}
+	if !strings.Contains(err.Error(), "553") {
+		t.Errorf("error %q should carry the server's reply code", err)
+	}
+	if got, _ := backend.Get("/upload/a.txt"); string(got) != "existing" {
+		t.Errorf("the existing file was modified: %q", got)
+	}
+	if paths := backend.Paths(); !slices.Equal(paths, []string{"/upload/a.txt"}) {
+		t.Errorf("paths = %v, want the temp file cleaned up", paths)
+	}
+}
+
+// The retry case from the design notes: the connection dies after the server
+// has committed the rename but before its reply arrives. Because withConn
+// re-runs the whole body, the second attempt's STOR recreates the temp file
+// and the RNFR that follows finds it, so the operation still succeeds.
+// Retrying the rename alone would have hit 550 on work that had been done.
+func TestCreateRetriesTheWholeSequenceAfterAConnectionDrop(t *testing.T) {
+	backend := fake.NewBackend()
+	b := newBinding(t, backend, map[string]string{"tempFileNamePattern": "{name}.tmp"})
+
+	before := backend.Dials()
+	var dropped bool
+	backend.FailNext = func(op, p string) error {
+		if op == "rename" && !dropped {
+			dropped = true
+			// The server did the work; only the reply was lost.
+			backend.Rename(p, "/upload/a.txt")
+			return io.ErrUnexpectedEOF
+		}
+		return nil
+	}
+
+	if _, err := invoke(t, b, bindings.CreateOperation, []byte("hello"), map[string]string{"fileName": "a.txt"}); err != nil {
+		t.Fatalf("create should have succeeded on the retry: %v", err)
+	}
+	if backend.Dials() <= before {
+		t.Error("the retry should have dialled a fresh connection")
+	}
+	if got, _ := backend.Get("/upload/a.txt"); string(got) != "hello" {
+		t.Errorf("stored = %q, want hello", got)
+	}
+	if paths := backend.Paths(); !slices.Equal(paths, []string{"/upload/a.txt"}) {
+		t.Errorf("paths = %v, want no temp file left by the retry", paths)
 	}
 }

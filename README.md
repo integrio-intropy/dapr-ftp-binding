@@ -62,6 +62,7 @@ spec:
 | `disableEPSV` | no | `false` | Disable extended passive mode. |
 | `trustPASVIP` | no | `false` | Use the server's advertised PASV address. Usually needed behind NAT or Docker. |
 | `maxConnections` | no | `5` | Concurrent FTP sessions, **per component instance**. |
+| `tempFileNamePattern` | no | — (off) | Upload under this name, then rename onto `fileName`. `{name}` is the base name, e.g. `{name}.tmp`. See below. |
 
 `timeout` bounds connecting and logging in, and how long a request waits for a
 free connection from the pool. It does **not** bound an operation already in
@@ -72,7 +73,8 @@ flight — see "Scope" below.
 **`create`** — `fileName` is required; the request data is the file content.
 Existing files are overwritten, as they are on every mainstream FTP server.
 Responds `{"fileName":"/upload/hello.txt"}` with the joined server path. Parent
-directories are not created.
+directories are not created. With `tempFileNamePattern` set, the upload goes to
+a temp name first — see below.
 
 **`get`** — `fileName` is required. Responds with the raw bytes and a `size`
 metadata field.
@@ -82,6 +84,33 @@ metadata field.
 matching the SFTP binding's shape.
 
 **`delete`** — `fileName` is required. Responds HTTP 200 with an empty body.
+
+
+### Writing through a temp name
+
+A partner polling the folder can otherwise pick up a file while it is still
+uploading. Set `tempFileNamePattern` and `create` uploads to that name instead,
+then renames it onto `fileName` with `RNFR`/`RNTO`:
+
+```yaml
+    - name: tempFileNamePattern
+      value: "{name}.tmp"
+```
+
+`POST create` with `fileName: out/a.xml` then writes `out/a.xml.tmp` and renames
+it to `out/a.xml`. The rename is a control-channel command: nothing is
+re-uploaded. `{name}` is replaced with the base name, and the pattern may not
+contain `/` or `\`.
+
+What this does and does not buy you:
+
+- **A partner never sees a half-written file under the final name.** This is
+  the point of the feature, and it holds wherever rename is supported.
+- **Leftover temp files are not cleaned up.** A failed rename removes the temp
+  file on a best-effort basis, but a hard crash between the upload and the
+  rename leaves one behind.
+- **Concurrent `create` calls for the same `fileName` collide** on one temp
+  name. The last writer wins. Do not run two writers against one name.
 
 
 ## Security notes

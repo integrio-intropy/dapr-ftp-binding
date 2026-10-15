@@ -324,3 +324,72 @@ func TestStaleConnectionRecovery(t *testing.T) {
 	}
 	_, _ = invoke(t, b, contribbindings.DeleteOperation, nil, map[string]string{"fileName": name})
 }
+
+// The temp-name write against every real server: the temp name must be gone,
+// the final name must hold the exact payload, and nothing may be left behind.
+func TestTempFileNameWriteAllServers(t *testing.T) {
+	for _, s := range servers {
+		t.Run(s.name, func(t *testing.T) {
+			b := newBinding(t, s, map[string]string{"tempFileNamePattern": "{name}.tmp"})
+			name := fmt.Sprintf("temp-%d.bin", time.Now().UnixNano())
+
+			if _, err := invoke(t, b, contribbindings.CreateOperation, payload, map[string]string{"fileName": name}); err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			t.Cleanup(func() {
+				_, _ = invoke(t, b, contribbindings.DeleteOperation, nil, map[string]string{"fileName": name})
+			})
+
+			got, err := invoke(t, b, contribbindings.GetOperation, nil, map[string]string{"fileName": name})
+			if err != nil {
+				t.Fatalf("get %q after the rename: %v", name, err)
+			}
+			if !bytes.Equal(got.Data, payload) {
+				t.Fatalf("payload corrupted:\n got %q\nwant %q", got.Data, payload)
+			}
+			if _, err := invoke(t, b, contribbindings.GetOperation, nil, map[string]string{"fileName": name + ".tmp"}); err == nil {
+				t.Errorf("the temp file %q.tmp is still on the server after the rename", name)
+			}
+		})
+	}
+}
+
+// Whether RNTO replaces an existing target is server-defined: RFC 959 does not
+// say. This test does not assert one behaviour, it records which one each
+// server we support actually has, so the README's claim is measured rather
+// than assumed. Both outcomes pass; a partially applied one does not.
+func TestRenameOntoExistingIsServerDefined(t *testing.T) {
+	for _, s := range servers {
+		t.Run(s.name, func(t *testing.T) {
+			b := newBinding(t, s, map[string]string{"tempFileNamePattern": "{name}.tmp"})
+			name := fmt.Sprintf("clobber-%d.bin", time.Now().UnixNano())
+
+			if _, err := invoke(t, b, contribbindings.CreateOperation, []byte("first"), map[string]string{"fileName": name}); err != nil {
+				t.Fatalf("create the first file: %v", err)
+			}
+			t.Cleanup(func() {
+				_, _ = invoke(t, b, contribbindings.DeleteOperation, nil, map[string]string{"fileName": name})
+				_, _ = invoke(t, b, contribbindings.DeleteOperation, nil, map[string]string{"fileName": name + ".tmp"})
+			})
+
+			_, err := invoke(t, b, contribbindings.CreateOperation, []byte("second"), map[string]string{"fileName": name})
+
+			got, getErr := invoke(t, b, contribbindings.GetOperation, nil, map[string]string{"fileName": name})
+			if getErr != nil {
+				t.Fatalf("the file is gone after the second create: %v", getErr)
+			}
+			switch {
+			case err == nil && string(got.Data) == "second":
+				t.Logf("%s: RNTO replaces an existing target", s.name)
+			case err != nil && string(got.Data) == "first":
+				t.Logf("%s: RNTO refuses an existing target, reported as: %v", s.name, err)
+				// A refusal must not strand the temp file.
+				if _, e := invoke(t, b, contribbindings.GetOperation, nil, map[string]string{"fileName": name + ".tmp"}); e == nil {
+					t.Errorf("the refused rename left %q.tmp behind", name)
+				}
+			default:
+				t.Fatalf("neither replaced nor refused cleanly: create err = %v, content = %q", err, got.Data)
+			}
+		})
+	}
+}

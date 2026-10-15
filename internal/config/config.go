@@ -51,30 +51,32 @@ const (
 // treated bare integers inconsistently across versions, and a silent 1000x
 // error on a timeout is a miserable bug to chase.
 type raw struct {
-	Address            string `json:"address" mapstructure:"address"`
-	Username           string `json:"username" mapstructure:"username"`
-	Password           string `json:"password" mapstructure:"password"`
-	RootPath           string `json:"rootPath" mapstructure:"rootPath"`
-	TLSMode            string `json:"tlsMode" mapstructure:"tlsMode"`
-	InsecureSkipVerify bool   `json:"insecureSkipVerify" mapstructure:"insecureSkipVerify"`
-	Timeout            string `json:"timeout" mapstructure:"timeout"`
-	DisableEPSV        bool   `json:"disableEPSV" mapstructure:"disableEPSV"`
-	TrustPASVIP        bool   `json:"trustPASVIP" mapstructure:"trustPASVIP"`
-	MaxConnections     int    `json:"maxConnections" mapstructure:"maxConnections"`
+	Address             string `json:"address" mapstructure:"address"`
+	Username            string `json:"username" mapstructure:"username"`
+	Password            string `json:"password" mapstructure:"password"`
+	RootPath            string `json:"rootPath" mapstructure:"rootPath"`
+	TLSMode             string `json:"tlsMode" mapstructure:"tlsMode"`
+	InsecureSkipVerify  bool   `json:"insecureSkipVerify" mapstructure:"insecureSkipVerify"`
+	Timeout             string `json:"timeout" mapstructure:"timeout"`
+	DisableEPSV         bool   `json:"disableEPSV" mapstructure:"disableEPSV"`
+	TrustPASVIP         bool   `json:"trustPASVIP" mapstructure:"trustPASVIP"`
+	MaxConnections      int    `json:"maxConnections" mapstructure:"maxConnections"`
+	TempFileNamePattern string `json:"tempFileNamePattern" mapstructure:"tempFileNamePattern"`
 }
 
 // Config is validated and immutable.
 type Config struct {
-	Address        string
-	Username       string
-	Password       string
-	RootPath       string
-	TLSMode        TLSMode
-	TLSConfig      *tls.Config // nil when TLSMode is TLSNone
-	Timeout        time.Duration
-	DisableEPSV    bool
-	TrustPASVIP    bool
-	MaxConnections int
+	Address             string
+	Username            string
+	Password            string
+	RootPath            string
+	TLSMode             TLSMode
+	TLSConfig           *tls.Config // nil when TLSMode is TLSNone
+	Timeout             time.Duration
+	DisableEPSV         bool
+	TrustPASVIP         bool
+	MaxConnections      int
+	TempFileNamePattern string
 }
 
 // Target is a credential-free description for logs and error messages.
@@ -91,10 +93,10 @@ func (c *Config) String() string {
 		return "<nil>"
 	}
 	return fmt.Sprintf(
-		"ftp.Config{Target:%s Username:%q Password:%s RootPath:%q InsecureSkipVerify:%t Timeout:%s DisableEPSV:%t TrustPASVIP:%t MaxConnections:%d}",
+		"ftp.Config{Target:%s Username:%q Password:%s RootPath:%q InsecureSkipVerify:%t Timeout:%s DisableEPSV:%t TrustPASVIP:%t MaxConnections:%d TempFileNamePattern:%q}",
 		c.Target(), c.Username, redacted(c.Password), c.RootPath,
 		c.TLSConfig != nil && c.TLSConfig.InsecureSkipVerify,
-		c.Timeout, c.DisableEPSV, c.TrustPASVIP, c.MaxConnections)
+		c.Timeout, c.DisableEPSV, c.TrustPASVIP, c.MaxConnections, c.TempFileNamePattern)
 }
 
 // GoString implements fmt.GoStringer so %#v is redacted too.
@@ -167,6 +169,10 @@ func Parse(props map[string]string) (*Config, []string, error) {
 		cfg.MaxConnections = maxConnections
 	}
 
+	if cfg.TempFileNamePattern, err = parseTempFileNamePattern(r.TempFileNamePattern); err != nil {
+		return nil, nil, err
+	}
+
 	if cfg.TLSConfig, warns, err = buildTLS(cfg, r, warns); err != nil {
 		return nil, nil, err
 	}
@@ -179,6 +185,44 @@ func Parse(props map[string]string) (*Config, []string, error) {
 	}
 
 	return cfg, warns, nil
+}
+
+// NamePlaceholder is replaced with the requested file's base name.
+const NamePlaceholder = "{name}"
+
+// parseTempFileNamePattern validates the temp-name pattern, or returns "" for
+// the default of uploading straight to the final name.
+//
+// The pattern may not contain a path separator: the temp file has to land in
+// the same directory as the final one. A rename within one directory on one
+// filesystem is atomic on every ordinary server, while one that crosses a
+// mount boundary is implemented as copy-and-delete by some, which would give
+// back exactly the half-written file this feature exists to prevent.
+func parseTempFileNamePattern(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
+	}
+	if !strings.Contains(s, NamePlaceholder) {
+		return "", fmt.Errorf("tempFileNamePattern %q must contain %s, for example \"%s.tmp\"", s, NamePlaceholder, NamePlaceholder)
+	}
+	if s == NamePlaceholder {
+		return "", fmt.Errorf("tempFileNamePattern %q is the final name itself: add something to it, for example \"%s.tmp\"", s, NamePlaceholder)
+	}
+	if strings.ContainsAny(s, "/\\") {
+		return "", fmt.Errorf("tempFileNamePattern %q must not contain a path separator: the temp file has to be renamed within one directory", s)
+	}
+	return s, nil
+}
+
+// TempPath returns the name create uploads to before renaming it to
+// remotePath, or remotePath itself when the feature is off.
+func (c *Config) TempPath(remotePath string) string {
+	if c.TempFileNamePattern == "" {
+		return remotePath
+	}
+	dir, name := path.Split(remotePath)
+	return path.Join(dir, strings.ReplaceAll(c.TempFileNamePattern, NamePlaceholder, name))
 }
 
 func parseTLSMode(s string) (TLSMode, error) {
