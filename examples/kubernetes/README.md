@@ -34,9 +34,30 @@ open for its lifetime, so losing every connection means the sidecar is gone.
 "args": ["-exit-when-idle", "30s"]
 ```
 
-in the `dapr.io/component-container` annotation. The timer only starts once the
-sidecar has connected at least once, and any reconnect disarms it, so neither a
-slow daprd start nor the connect/disconnect of component discovery will trip it.
+in the `dapr.io/component-container` annotation. Once the sidecar has connected,
+any reconnect disarms the timer, so the connect/disconnect of component
+discovery will not trip it.
+
+A sidecar that never connects is handled separately, by
+`-exit-when-no-sidecar` (default `1m`). If daprd scans the socket folder before
+this container has created its socket it fails with `couldn't find binding` and
+dies, and the disconnect `-exit-when-idle` waits for can then never arrive: the
+component sits on a socket nobody will dial and the Job runs until someone
+kills it. The startup wait bounds that. It has to be generous — a slow image
+pull or a sidecar loading many components is an honest start, not a dead one —
+so raise it if your sidecars routinely take longer than five minutes to reach
+the component, and set it to `0` to keep waiting indefinitely:
+
+```json
+"args": ["-exit-when-idle", "30s", "-exit-when-no-sidecar", "10m"]
+```
+
+Exits from either timer are exit code 0, so the pod can reach `Succeeded`. If
+the sidecar dying on startup should instead fail the Job, give the Job an
+`activeDeadlineSeconds` or have the app container exit non-zero when it cannot
+reach Dapr; this flag deliberately does not turn a missing sidecar into a
+failure, because it cannot tell one from a sidecar that was simply never going
+to arrive on this pod.
 
 Give it a **separate Component** from the one your Deployments use, scoped to
 the Job's app-ids. The flag lives on the container, so every pod that injects

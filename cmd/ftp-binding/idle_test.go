@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,11 +33,20 @@ func fired(t *testing.T, w *idleWatcher, d time.Duration) bool {
 	}
 }
 
+// started builds a watcher with the startup wait armed, as the run loop does
+// once the socket is listening.
+func started(timeout, startWait time.Duration) *idleWatcher {
+	w := newIdleWatcher(timeout, startWait)
+	w.Start()
+	return w
+}
+
 func TestZeroTimeoutDisablesTheWatcher(t *testing.T) {
-	w := newIdleWatcher(0)
+	w := newIdleWatcher(0, quick)
 	if w != nil {
-		t.Fatalf("newIdleWatcher(0) = %v, want nil so it is never registered", w)
+		t.Fatalf("newIdleWatcher(0, quick) = %v, want nil so it is never registered", w)
 	}
+	w.Start() // must not panic on the nil watcher the run loop still calls
 	// A nil watcher's channel must block rather than fire, or every Deployment
 	// would exit as soon as the run loop reached its select.
 	if fired(t, w, quick) {
@@ -44,17 +54,66 @@ func TestZeroTimeoutDisablesTheWatcher(t *testing.T) {
 	}
 }
 
-// The component may be running for a while before daprd dials it. Firing in
-// that window would turn a slow sidecar start into a vanished component.
-func TestDoesNotFireBeforeTheSidecarHasEverConnected(t *testing.T) {
-	w := newIdleWatcher(quick)
+// The component may be running for a while before daprd dials it. Firing after
+// the idle timeout alone would turn a slow sidecar start into a vanished
+// component: before the first connection it is the longer startup wait that
+// applies.
+func TestDoesNotFireOnTheIdleTimeoutBeforeTheSidecarHasEverConnected(t *testing.T) {
+	w := started(quick, 100*quick)
 	if fired(t, w, 4*quick) {
-		t.Fatal("fired before any connection was seen")
+		t.Fatal("fired on the idle timeout before any connection was seen")
+	}
+}
+
+// A zero startup wait keeps the old behaviour: hold the socket open forever for
+// a sidecar that may yet arrive.
+func TestZeroStartWaitWaitsForeverForTheFirstConnection(t *testing.T) {
+	w := started(quick, 0)
+	if fired(t, w, 6*quick) {
+		t.Fatal("fired although the startup wait was disabled")
+	}
+}
+
+// The case this is all for: daprd dies before it ever dials us -- typically
+// because it scanned the socket folder before our socket existed -- so no
+// disconnect is ever coming. Without this the Job runs forever.
+func TestFiresWhenTheSidecarNeverConnects(t *testing.T) {
+	w := started(100*quick, quick)
+	select {
+	case reason := <-w.Fired():
+		// The reason is logged as the process exits, and is the only clue an
+		// operator gets that the sidecar was the thing that went missing.
+		if !strings.Contains(reason, "never connected") {
+			t.Fatalf("reason = %q, want it to say the sidecar never connected", reason)
+		}
+	case <-time.After(20 * quick):
+		t.Fatal("did not fire although no sidecar ever connected")
+	}
+}
+
+// A sidecar that arrives within the startup wait disarms it for good: from then
+// on only a disconnect plus the idle timeout may fire.
+func TestTheFirstConnectionDisarmsTheStartupWait(t *testing.T) {
+	w := started(100*quick, 2*quick)
+	begin(w)
+	if fired(t, w, 6*quick) {
+		t.Fatal("fired on the startup wait although the sidecar had connected")
+	}
+}
+
+// Disconnecting before the startup wait would have elapsed hands over to the
+// idle timeout rather than leaving the startup timer to fire early.
+func TestDisconnectAfterConnectingUsesTheIdleTimeout(t *testing.T) {
+	w := started(4*quick, 100*quick)
+	begin(w)
+	end(w)
+	if !fired(t, w, 40*quick) {
+		t.Fatal("did not fire on the idle timeout after the sidecar disconnected")
 	}
 }
 
 func TestFiresAfterTheLastConnectionCloses(t *testing.T) {
-	w := newIdleWatcher(quick)
+	w := started(quick, 100*quick)
 	begin(w)
 	if fired(t, w, 2*quick) {
 		t.Fatal("fired while the sidecar was still connected")
@@ -66,7 +125,7 @@ func TestFiresAfterTheLastConnectionCloses(t *testing.T) {
 }
 
 func TestAnotherLiveConnectionKeepsItQuiet(t *testing.T) {
-	w := newIdleWatcher(quick)
+	w := started(quick, 100*quick)
 	begin(w)
 	begin(w)
 	end(w)
@@ -78,7 +137,7 @@ func TestAnotherLiveConnectionKeepsItQuiet(t *testing.T) {
 // Discovery dials, calls the reflection API, hangs up, and only then does the
 // sidecar connect again to initialise the component. That gap must not count.
 func TestReconnectingDisarmsTheTimer(t *testing.T) {
-	w := newIdleWatcher(quick)
+	w := started(quick, 100*quick)
 	begin(w)
 	end(w)
 	time.Sleep(quick / 3)
@@ -112,7 +171,7 @@ func TestFiresWhenARealClientDisconnects(t *testing.T) {
 		t.Fatalf("listening on %s: %v", socket, err)
 	}
 
-	w := newIdleWatcher(quick)
+	w := started(quick, 100*quick)
 	server := grpc.NewServer(grpc.StatsHandler(w))
 	go func() { _ = server.Serve(lis) }()
 	t.Cleanup(server.Stop)
