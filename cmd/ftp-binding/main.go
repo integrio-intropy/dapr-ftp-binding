@@ -59,7 +59,8 @@ const (
 	// so responses above that are rejected on its side regardless.
 	defaultMaxMessageSize = (4 << 20) + (1 << 20)
 
-	shutdownGrace = 10 * time.Second
+	shutdownGrace    = 10 * time.Second
+	defaultStartWait = 1 * time.Minute
 )
 
 func main() {
@@ -69,6 +70,7 @@ func main() {
 		maxMsgSize  = flag.Int("max-message-size", defaultMaxMessageSize, "maximum gRPC message size in bytes; raise alongside the sidecar's --max-body-size")
 		logLevel    = flag.String("log-level", "info", "log level: debug, info, warn or error")
 		exitIdle    = flag.Duration("exit-when-idle", 0, "exit once the sidecar has connected and then stayed disconnected for this long; for Job and CronJob pods, where a component left running keeps the Job from completing. Leave at 0 for Deployments")
+		startWait   = flag.Duration("exit-when-no-sidecar", defaultStartWait, "with -exit-when-idle, also exit if no sidecar ever connects within this long after the socket is up, which is what happens when daprd dies before reaching us. 0 waits forever")
 		showVersion = flag.Bool("version", false, "print the version and exit")
 	)
 	flag.Parse()
@@ -98,7 +100,7 @@ func main() {
 		log.Fatalf("invalid -socket-perm: %v", err)
 	}
 
-	if err := run(log, *socketName, perm, *maxMsgSize, *exitIdle); err != nil {
+	if err := run(log, *socketName, perm, *maxMsgSize, *exitIdle, *startWait); err != nil {
 		log.Fatalf("ftp binding failed: %v", err)
 	}
 }
@@ -118,7 +120,7 @@ func parsePerm(s string) (os.FileMode, error) {
 	return os.FileMode(n), nil
 }
 
-func run(log logger.Logger, socketName string, perm os.FileMode, maxMsgSize int, exitWhenIdle time.Duration) error {
+func run(log logger.Logger, socketName string, perm os.FileMode, maxMsgSize int, exitWhenIdle, startWait time.Duration) error {
 	socketPath := filepath.Join(socketFolder(), socketName+".sock")
 
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0o750); err != nil {
@@ -160,10 +162,13 @@ func run(log logger.Logger, socketName string, perm os.FileMode, maxMsgSize int,
 		grpc.MaxRecvMsgSize(maxMsgSize),
 		grpc.MaxSendMsgSize(maxMsgSize),
 	}
-	idle := newIdleWatcher(exitWhenIdle)
+	idle := newIdleWatcher(exitWhenIdle, startWait)
 	if idle != nil {
 		serverOpts = append(serverOpts, grpc.StatsHandler(idle))
 		log.Infof("will exit %s after the sidecar disconnects", exitWhenIdle)
+		if startWait > 0 {
+			log.Infof("will exit if no sidecar connects within %s", startWait)
+		}
 	}
 	server := grpc.NewServer(serverOpts...)
 
@@ -183,6 +188,10 @@ func run(log logger.Logger, socketName string, perm os.FileMode, maxMsgSize int,
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(lis) }()
 
+	// Only now is the socket dialable, so this is where the wait for the
+	// sidecar's first connection starts.
+	idle.Start()
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 
@@ -192,10 +201,10 @@ func run(log logger.Logger, socketName string, perm os.FileMode, maxMsgSize int,
 		return err
 	case s := <-sig:
 		log.Infof("received %s, shutting down", s)
-	case <-idle.Fired():
+	case reason := <-idle.Fired():
 		// Exit 0: under restartPolicy: Never a container that exits non-zero
 		// puts the whole pod into Failed, and the Job with it.
-		log.Infof("no sidecar connection for %s, shutting down so the pod can complete", exitWhenIdle)
+		log.Infof("%s, shutting down so the pod can complete", reason)
 	}
 
 	// Stop accepting work, then close every pool so the FTP server sees a

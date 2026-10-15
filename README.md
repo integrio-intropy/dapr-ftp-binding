@@ -203,6 +203,7 @@ the process itself is hosted.
 | `-max-message-size` | `5242880` | Maximum gRPC message in bytes. Raise alongside the sidecar's `--max-body-size`; |
 | `-log-level` | `info` | `debug`, `info`, `warn` or `error`. |
 | `-exit-when-idle` | `0` (off) | Exit once the sidecar has connected and then stayed disconnected for this long. For Jobs and CronJobs; see the Kubernetes example. Leave off for Deployments. |
+| `-exit-when-no-sidecar` | `1m` | With `-exit-when-idle`, also exit if no sidecar ever connects within this long after the socket is up — the case where daprd died before reaching us. `0` waits forever. Ignored without `-exit-when-idle`. |
 | `-version` | | Print the version and exit. |
 
 
