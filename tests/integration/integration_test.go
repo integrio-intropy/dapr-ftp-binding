@@ -393,3 +393,49 @@ func TestRenameOntoExistingIsServerDefined(t *testing.T) {
 		})
 	}
 }
+
+// Creating the directory tree on the way, against every real server.
+//
+// This is the half the fake cannot prove: whether a server refuses a store
+// into a missing directory with 550 or 553, and whether MKD behaves as the
+// walk assumes. The test leaves the directories behind -- the binding has no
+// rmdir and the containers are disposable -- so the names are unique per run.
+func TestCreateDirsAllServers(t *testing.T) {
+	for _, s := range servers {
+		t.Run(s.name, func(t *testing.T) {
+			name := fmt.Sprintf("mkdir-%d/nested/deeper/a.bin", time.Now().UnixNano())
+
+			// Without the flag the same write fails. That failure is the whole
+			// reason the flag exists, so it is worth asserting rather than
+			// assuming, and its wording differs per server.
+			plain := newBinding(t, s, nil)
+			if _, err := invoke(t, plain, contribbindings.CreateOperation, payload, map[string]string{"fileName": name}); err == nil {
+				t.Fatal("a create into a missing directory succeeded without createDirs")
+			} else {
+				t.Logf("%s refuses a store into a missing directory with: %v", s.name, err)
+			}
+
+			b := newBinding(t, s, map[string]string{"createDirs": "true"})
+			if _, err := invoke(t, b, contribbindings.CreateOperation, payload, map[string]string{"fileName": name}); err != nil {
+				t.Fatalf("create with createDirs: %v", err)
+			}
+			t.Cleanup(func() {
+				_, _ = invoke(t, b, contribbindings.DeleteOperation, nil, map[string]string{"fileName": name})
+			})
+
+			got, err := invoke(t, b, contribbindings.GetOperation, nil, map[string]string{"fileName": name})
+			if err != nil {
+				t.Fatalf("get %q: %v", name, err)
+			}
+			if !bytes.Equal(got.Data, payload) {
+				t.Fatalf("payload corrupted:\n got %q\nwant %q", got.Data, payload)
+			}
+
+			// Again, into the tree that now exists: every MKD along the chain
+			// is refused this time, and none of that may reach the caller.
+			if _, err := invoke(t, b, contribbindings.CreateOperation, payload, map[string]string{"fileName": name}); err != nil {
+				t.Fatalf("second create into the existing tree: %v", err)
+			}
+		})
+	}
+}

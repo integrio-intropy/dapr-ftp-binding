@@ -59,6 +59,16 @@ type Conn interface {
 	// Delete removes a single file. It is not expected to remove directories.
 	Delete(ctx context.Context, remotePath string) error
 
+	// MakeDir creates a single directory (MKD). It creates one level only:
+	// RFC 959 says nothing about intermediate components and ordinary servers
+	// refuse a nested path whose parent is missing, so callers that want a
+	// whole chain must walk it themselves.
+	//
+	// Creating a directory that already exists is an error, not a no-op --
+	// most servers answer 550 -- so callers must decide what that means to
+	// them rather than treating every failure as fatal.
+	MakeDir(ctx context.Context, remotePath string) error
+
 	// Rename moves from to to. It is a control-channel operation (RNFR/RNTO):
 	// no data connection is opened and nothing is re-uploaded.
 	//

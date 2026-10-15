@@ -32,6 +32,7 @@ var ErrConcurrentUse = errors.New("fake: concurrent use of a single Conn")
 type Backend struct {
 	mu    sync.Mutex
 	files map[string][]byte
+	dirs  map[string]struct{}
 
 	// DialErr, when set, makes every Dial fail.
 	DialErr error
@@ -53,6 +54,11 @@ type Backend struct {
 	// an RNTO onto an existing name instead of replacing it. RFC 959 does not
 	// say which is correct, so both behaviours have to be exercised.
 	RenameRefusesOverwrite bool
+	// StrictDirs makes the backend behave like a real filesystem: a store into
+	// a directory that does not exist is refused, and MakeDir is the only way
+	// to bring one into being. It is off by default so that tests about other
+	// behaviour need not seed a directory tree.
+	StrictDirs bool
 
 	dials        atomic.Int64
 	liveSessions atomic.Int64
@@ -62,13 +68,50 @@ type Backend struct {
 
 // NewBackend returns an empty backend.
 func NewBackend() *Backend {
-	return &Backend{files: map[string][]byte{}}
+	return &Backend{files: map[string][]byte{}, dirs: map[string]struct{}{}}
+}
+
+// Mkdir seeds a directory, along with every parent above it.
+func (b *Backend) Mkdir(p string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.mkdirLocked(p)
+}
+
+func (b *Backend) mkdirLocked(p string) {
+	for d := path.Clean(p); d != "/" && d != "." && d != ""; d = path.Dir(d) {
+		b.dirs[d] = struct{}{}
+	}
+}
+
+// Dirs returns every existing directory, sorted.
+func (b *Backend) Dirs() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]string, 0, len(b.dirs))
+	for d := range b.dirs {
+		out = append(out, d)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// dirExistsLocked reports whether a store may create a file in p. The implicit
+// top-level directories are always there, as they are on a real server.
+func (b *Backend) dirExistsLocked(p string) bool {
+	d := path.Clean(p)
+	if d == "/" || d == "." || d == "" {
+		return true
+	}
+	_, ok := b.dirs[d]
+	return ok
 }
 
 // Put seeds a file.
 func (b *Backend) Put(p string, data []byte) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.mkdirLocked(path.Dir(p))
 	b.files[p] = append([]byte(nil), data...)
 }
 
@@ -228,7 +271,31 @@ func (c *conn) Store(ctx context.Context, p string, r io.Reader) error {
 	}
 	c.b.mu.Lock()
 	defer c.b.mu.Unlock()
+	if c.b.StrictDirs && !c.b.dirExistsLocked(path.Dir(p)) {
+		// vsftpd's wording for a STOR whose open() failed, which is what a
+		// missing parent directory looks like on the wire.
+		return &textproto.Error{Code: ftperr.CodeNameNotAllowed, Msg: "Could not create file."}
+	}
 	c.b.files[p] = data
+	return nil
+}
+
+// MakeDir models MKD on a POSIX-backed server: one level only, and creating a
+// directory that is already there is an error.
+func (c *conn) MakeDir(ctx context.Context, p string) error {
+	if err := c.enter(ctx, "mkdir", p); err != nil {
+		return err
+	}
+	defer c.exit()
+	c.b.mu.Lock()
+	defer c.b.mu.Unlock()
+	if c.b.dirExistsLocked(p) {
+		return &textproto.Error{Code: ftperr.CodeFileUnavailable, Msg: "Create directory operation failed."}
+	}
+	if !c.b.dirExistsLocked(path.Dir(p)) {
+		return &textproto.Error{Code: ftperr.CodeFileUnavailable, Msg: "Create directory operation failed."}
+	}
+	c.b.dirs[path.Clean(p)] = struct{}{}
 	return nil
 }
 

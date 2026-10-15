@@ -33,3 +33,8 @@ spec:
     # not required by RFC 959 and FEAT does not advertise it, so confirm first.
     # - name: tempFileNamePattern
     #   value: "{name}.tmp"
+    # Optional, off by default. Create the directories under rootPath that a
+    # create needs, instead of failing when they are missing. Only tried after
+    # an upload has actually been refused, and never outside rootPath.
+    # - name: createDirs
+    #   value: "true"

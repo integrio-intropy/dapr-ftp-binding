@@ -99,3 +99,15 @@ metadata:
     example: '"{name}.tmp"'
     default: '""'
     type: string
+  - name: createDirs
+    required: false
+    description: >
+      When set, a create whose target directory does not exist creates the
+      missing directories under rootPath (MKD, one level at a time) and uploads
+      again. The directories are only walked after an upload has actually been
+      refused, so a directory that already exists costs nothing. Nothing is
+      ever created outside rootPath. Off by default: creating directories is a
+      write, and a typo in fileName should not quietly build a tree.
+    example: '"true"'
+    default: '"false"'
+    type: bool

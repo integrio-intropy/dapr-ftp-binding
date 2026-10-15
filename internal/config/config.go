@@ -62,6 +62,7 @@ type raw struct {
 	TrustPASVIP         bool   `json:"trustPASVIP" mapstructure:"trustPASVIP"`
 	MaxConnections      int    `json:"maxConnections" mapstructure:"maxConnections"`
 	TempFileNamePattern string `json:"tempFileNamePattern" mapstructure:"tempFileNamePattern"`
+	CreateDirs          bool   `json:"createDirs" mapstructure:"createDirs"`
 }
 
 // Config is validated and immutable.
@@ -77,6 +78,7 @@ type Config struct {
 	TrustPASVIP         bool
 	MaxConnections      int
 	TempFileNamePattern string
+	CreateDirs          bool
 }
 
 // Target is a credential-free description for logs and error messages.
@@ -93,10 +95,10 @@ func (c *Config) String() string {
 		return "<nil>"
 	}
 	return fmt.Sprintf(
-		"ftp.Config{Target:%s Username:%q Password:%s RootPath:%q InsecureSkipVerify:%t Timeout:%s DisableEPSV:%t TrustPASVIP:%t MaxConnections:%d TempFileNamePattern:%q}",
+		"ftp.Config{Target:%s Username:%q Password:%s RootPath:%q InsecureSkipVerify:%t Timeout:%s DisableEPSV:%t TrustPASVIP:%t MaxConnections:%d TempFileNamePattern:%q CreateDirs:%t}",
 		c.Target(), c.Username, redacted(c.Password), c.RootPath,
 		c.TLSConfig != nil && c.TLSConfig.InsecureSkipVerify,
-		c.Timeout, c.DisableEPSV, c.TrustPASVIP, c.MaxConnections, c.TempFileNamePattern)
+		c.Timeout, c.DisableEPSV, c.TrustPASVIP, c.MaxConnections, c.TempFileNamePattern, c.CreateDirs)
 }
 
 // GoString implements fmt.GoStringer so %#v is redacted too.
@@ -129,6 +131,7 @@ func Parse(props map[string]string) (*Config, []string, error) {
 		Password:    r.Password,
 		DisableEPSV: r.DisableEPSV,
 		TrustPASVIP: r.TrustPASVIP,
+		CreateDirs:  r.CreateDirs,
 	}
 
 	mode, err := parseTLSMode(r.TLSMode)

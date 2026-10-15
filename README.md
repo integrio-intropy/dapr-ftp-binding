@@ -63,6 +63,7 @@ spec:
 | `trustPASVIP` | no | `false` | Use the server's advertised PASV address. Usually needed behind NAT or Docker. |
 | `maxConnections` | no | `5` | Concurrent FTP sessions, **per component instance**. |
 | `tempFileNamePattern` | no | — (off) | Upload under this name, then rename onto `fileName`. `{name}` is the base name, e.g. `{name}.tmp`. See below. |
+| `createDirs` | no | `false` | Create missing directories under `rootPath` on `create`. See below. |
 
 `timeout` bounds connecting and logging in, and how long a request waits for a
 free connection from the pool. It does **not** bound an operation already in
@@ -73,8 +74,8 @@ flight — see "Scope" below.
 **`create`** — `fileName` is required; the request data is the file content.
 Existing files are overwritten, as they are on every mainstream FTP server.
 Responds `{"fileName":"/upload/hello.txt"}` with the joined server path. Parent
-directories are not created. With `tempFileNamePattern` set, the upload goes to
-a temp name first — see below.
+directories are not created unless `createDirs` is set — see below. With
+`tempFileNamePattern` set, the upload goes to a temp name first — also below.
 
 **`get`** — `fileName` is required. Responds with the raw bytes and a `size`
 metadata field.
@@ -111,6 +112,54 @@ What this does and does not buy you:
   rename leaves one behind.
 - **Concurrent `create` calls for the same `fileName` collide** on one temp
   name. The last writer wins. Do not run two writers against one name.
+
+
+### Creating directories
+
+By default the binding uploads and nothing else: if the directory above
+`fileName` does not exist, the server refuses the write and you get its reply.
+What that reply looks like depends on the server, and none of them say "the
+directory is missing":
+
+| Server | Reply to a `STOR` into a directory that does not exist |
+|---|---|
+| vsftpd | `553 Could not create file.` |
+| pure-ftpd | `553 Can't open that file: No such file or directory` |
+| proftpd | `550 <path>: No such file or directory` |
+
+All three use those same codes for a permission problem, so the code alone
+never tells you which it is.
+
+Set `createDirs` and `create` answers such a refusal by creating the missing
+directories and uploading again:
+
+```yaml
+    - name: createDirs
+      value: "true"
+```
+
+`POST create` with `fileName: IQPL/DispatchForecast/a.xml` against
+`rootPath: /upload` then issues `MKD /upload/IQPL`, `MKD
+/upload/IQPL/DispatchForecast` and stores the file.
+
+What this does and does not do:
+
+- **The directories are only walked after an upload has been refused.** The
+  ordinary case — the folder is already there, which is every request after the
+  first — is still a single `STOR` and costs nothing. The price is paid on the
+  request that needs it, and on any request failing for another reason, which
+  spends one `MKD` per level before failing anyway.
+- **Nothing is created outside `rootPath`.** A `fileName` that climbs out with
+  `../` still gets its plain upload — paths are joined, not confined, and the
+  server decides — but the binding will not build a tree out there to make it
+  work.
+- **A level that already exists is expected to fail.** `MKD` has no "create if
+  missing" and servers answer 550 either way, so the walk shrugs those off. If
+  a level genuinely could not be created, the second upload fails and you get
+  the server's own reason for that, not a guess about the directory.
+- **Concurrent creates may race on `MKD`.** The loser's `MKD` fails, which is
+  indistinguishable from "already there", so both requests still succeed.
+- **Directories are never removed.** There is no `delete` for them.
 
 
 ## Security notes

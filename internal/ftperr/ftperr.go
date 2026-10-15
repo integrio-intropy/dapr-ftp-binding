@@ -69,7 +69,7 @@ const (
 	CodeServiceClosing    = 421 // service not available, closing control connection
 	CodeNotLoggedIn       = 530 // not logged in
 	CodeFileUnavailable   = 550 // file unavailable: not found, or no permission
-	CodeNameNotAllowed    = 553 // file name not allowed
+	CodeNameNotAllowed    = 553 // RFC 959: file name not allowed. In practice: the write failed
 	CodeStorageExceeded   = 552 // exceeded storage allocation
 	CodeNeedAccount       = 532 // need account for storing files
 	CodeFileBusy          = 450 // file unavailable, busy
@@ -116,7 +116,12 @@ func Explain(code int) string {
 	case CodeFileUnavailable:
 		return "the file does not exist, or the account lacks permission (FTP reports both as 550)"
 	case CodeNameNotAllowed:
-		return "the server rejected the file name"
+		// RFC 959 reads 553 as "file name not allowed", but no mainstream
+		// server uses it that way: vsftpd answers 553 "Could not create file."
+		// and pure-ftpd 553 "Can't open that file" for any failed open,
+		// whatever the reason. Pointing at the name sends operators looking in
+		// the wrong place, which is worse than saying less.
+		return "the server could not create the file: the directory above it may not exist (see createDirs), or the account may lack permission"
 	case CodeStorageExceeded:
 		return "the account is over its storage quota"
 	case CodeNeedAccount:
