@@ -41,3 +41,8 @@ spec:
       value: "/upload"
     - name: tlsMode
       value: "explicit"
+    # Optional, off by default. Upload to "<name>.tmp" and rename it onto the
+    # requested name, so a partner polling this folder never picks up a file
+    # mid-upload. Confirm the server supports RNFR/RNTO.
+    # - name: tempFileNamePattern
+    #   value: "{name}.tmp"

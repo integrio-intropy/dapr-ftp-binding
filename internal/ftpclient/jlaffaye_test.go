@@ -225,3 +225,55 @@ func TestRetrievePropagatesPostTransferFailure(t *testing.T) {
 	}
 	t.Logf("correctly failed after %d of %d bytes: %v", n, total, err)
 }
+
+// Rename over a real socket. This is the only tier that proves the library
+// really does RNFR/RNTO on the control channel and that a server accepts it;
+// the fake-driven tests above the seam cannot tell.
+func TestRenameMovesWithoutReTransferring(t *testing.T) {
+	ts := startServer(t, serverOpts{})
+	c := connect(t, ts, TLSNone, nil)
+	ctx := context.Background()
+
+	if err := c.Store(ctx, "/upload/a.dat.tmp", bytes.NewReader(binaryPayload)); err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if err := c.Rename(ctx, "/upload/a.dat.tmp", "/upload/a.dat"); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+
+	entries, err := c.List(ctx, "/upload")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if hasEntry(entries, "a.dat.tmp") {
+		t.Error("the temp name is still listed after the rename")
+	}
+	if !hasEntry(entries, "a.dat") {
+		t.Fatalf("list = %+v, want a.dat", entries)
+	}
+
+	// Content must be byte-identical: a rename moves the directory entry, it
+	// does not re-transfer, so TYPE I is irrelevant and nothing can mangle it.
+	var buf bytes.Buffer
+	if _, err := c.Retrieve(ctx, "/upload/a.dat", &buf); err != nil {
+		t.Fatalf("retrieve: %v", err)
+	}
+	if !bytes.Equal(buf.Bytes(), binaryPayload) {
+		t.Errorf("content changed across the rename:\n got %q\nwant %q", buf.Bytes(), binaryPayload)
+	}
+}
+
+// A rename whose source does not exist is a command-level refusal, so the
+// session stays usable -- withConn must report it rather than retry.
+func TestRenameMissingSourceReports550(t *testing.T) {
+	ts := startServer(t, serverOpts{})
+	c := connect(t, ts, TLSNone, nil)
+
+	err := c.Rename(context.Background(), "/upload/nope.tmp", "/upload/nope")
+	if err == nil {
+		t.Fatal("expected an error renaming a file that does not exist")
+	}
+	if c.Broken() {
+		t.Error("a 550 is the server's answer, not a transport failure; the session is still usable")
+	}
+}

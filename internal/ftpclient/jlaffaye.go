@@ -182,6 +182,15 @@ func (c *jlConn) Delete(ctx context.Context, remotePath string) error {
 	return c.end(c.sc.Delete(remotePath))
 }
 
+// Rename issues RNFR then RNTO. Both are control-channel commands, so unlike
+// Store and Retrieve there is no data connection and no transfer type to set.
+func (c *jlConn) Rename(ctx context.Context, from, to string) error {
+	if err := c.begin(ctx); err != nil {
+		return err
+	}
+	return c.end(c.sc.Rename(from, to))
+}
+
 func (c *jlConn) List(ctx context.Context, remotePath string) ([]Entry, error) {
 	if err := c.begin(ctx); err != nil {
 		return nil, err

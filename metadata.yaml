@@ -86,3 +86,16 @@ metadata:
     example: '"5"'
     default: '"5"'
     type: number
+  - name: tempFileNamePattern
+    required: false
+    description: >
+      When set, create uploads to this name in the same directory and then
+      renames it (RNFR/RNTO) onto the requested name, so a partner watching the
+      folder never sees a half-written file under the final name. "{name}" is
+      replaced with the base name; the pattern may not contain a path
+      separator. Empty, the default, uploads straight to the final name.
+      Rename is outside RFC 959's minimum command set and is not advertised by
+      FEAT, so confirm the server supports it before enabling this.
+    example: '"{name}.tmp"'
+    default: '""'
+    type: string

@@ -105,8 +105,12 @@ func (b *Binding) Init(ctx context.Context, meta bindings.Metadata) error {
 		}
 	}
 
-	b.log.Infof("ftp binding ready: target=%s rootPath=%s maxConnections=%d timeout=%s",
-		cfg.Target(), root, cfg.MaxConnections, cfg.Timeout)
+	temp := cfg.TempFileNamePattern
+	if temp == "" {
+		temp = "<off: create uploads straight to the final name>"
+	}
+	b.log.Infof("ftp binding ready: target=%s rootPath=%s maxConnections=%d timeout=%s tempFileNamePattern=%s",
+		cfg.Target(), root, cfg.MaxConnections, cfg.Timeout, temp)
 	return nil
 }
 
@@ -250,15 +254,47 @@ func annotate(err error) error {
 	return err
 }
 
+// create uploads req.Data to the resolved path.
+//
+// With tempFileNamePattern set it uploads to a temp name in the same directory
+// and renames it onto the requested name, so a partner watching the folder
+// never sees a half-written file under the final name. Note what this does and
+// does not buy: the rename is atomic and replaces the target on ordinary
+// servers, but RFC 959 guarantees neither, so "we never overwrite" is not a
+// promise this binding can make.
+//
+// Both steps go in one withConn body on purpose. withConn may run the body
+// twice on a connection-level failure, and re-running both is what makes the
+// retry safe: if the first attempt's RNTO reached the server but its reply did
+// not reach us, the second attempt's STOR recreates the temp file, so the
+// RNFR that follows finds it. Retrying the rename alone would hit 550 on an
+// operation that had in fact succeeded.
 func (b *Binding) create(ctx context.Context, req *bindings.InvokeRequest) (*bindings.InvokeResponse, error) {
 	remotePath, err := b.resolve(req, false)
 	if err != nil {
 		return nil, fmt.Errorf("ftp: create: %w", err)
 	}
+	cfg, _, _ := b.snapshot()
+	tempPath := cfg.TempPath(remotePath)
 
 	err = b.withConn(ctx, "create", remotePath, func(ctx context.Context, c ftpclient.Conn) error {
 		// A fresh reader each attempt, because withConn may run fn twice.
-		return c.Store(ctx, remotePath, bytes.NewReader(req.Data))
+		if serr := c.Store(ctx, tempPath, bytes.NewReader(req.Data)); serr != nil {
+			return serr
+		}
+		if tempPath == remotePath {
+			return nil
+		}
+		rerr := c.Rename(ctx, tempPath, remotePath)
+		if rerr != nil {
+			// Best effort, and it must not mask rerr. On a session the rename
+			// already broke, Delete returns ErrBrokenConn without touching the
+			// wire, which leaves the temp file behind for the operator.
+			if derr := c.Delete(ctx, tempPath); derr != nil {
+				b.log.Warnf("ftp: create %q: could not remove the temp file %q: %v", remotePath, tempPath, derr)
+			}
+		}
+		return rerr
 	})
 	if err != nil {
 		return nil, err

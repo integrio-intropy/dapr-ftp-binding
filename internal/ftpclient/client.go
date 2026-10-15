@@ -59,6 +59,16 @@ type Conn interface {
 	// Delete removes a single file. It is not expected to remove directories.
 	Delete(ctx context.Context, remotePath string) error
 
+	// Rename moves from to to. It is a control-channel operation (RNFR/RNTO):
+	// no data connection is opened and nothing is re-uploaded.
+	//
+	// Two things are server-defined and must not be relied on. RFC 959 does
+	// not say whether RNTO replaces an existing target -- POSIX-backed servers
+	// generally do, a few refuse with 553 -- and it does not require the
+	// command at all: it is outside the minimum implementation set and FEAT
+	// does not advertise it, so a server may answer 502.
+	Rename(ctx context.Context, from, to string) error
+
 	// List returns the entries of a directory. Listing a file is permitted and
 	// yields a single entry on most servers.
 	List(ctx context.Context, remotePath string) ([]Entry, error)
