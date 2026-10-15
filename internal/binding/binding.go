@@ -10,6 +10,7 @@ import (
 	"path"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/dapr/components-contrib/bindings"
@@ -109,8 +110,8 @@ func (b *Binding) Init(ctx context.Context, meta bindings.Metadata) error {
 	if temp == "" {
 		temp = "<off: create uploads straight to the final name>"
 	}
-	b.log.Infof("ftp binding ready: target=%s rootPath=%s maxConnections=%d timeout=%s tempFileNamePattern=%s",
-		cfg.Target(), root, cfg.MaxConnections, cfg.Timeout, temp)
+	b.log.Infof("ftp binding ready: target=%s rootPath=%s maxConnections=%d timeout=%s tempFileNamePattern=%s createDirs=%t",
+		cfg.Target(), root, cfg.MaxConnections, cfg.Timeout, temp, cfg.CreateDirs)
 	return nil
 }
 
@@ -254,7 +255,104 @@ func annotate(err error) error {
 	return err
 }
 
-// create uploads req.Data to the resolved path.
+// storeWithDirs uploads data to remotePath, and with createDirs on answers a
+// refusal that looks like a missing directory by creating the parents below
+// rootPath and storing once more.
+//
+// The directories are only walked after a store has actually failed. The
+// ordinary case -- the folder is already there, which is every request after
+// the first -- therefore costs no extra round trips, and no request pays for a
+// tree that exists. It also means a server that happens to reject writes for
+// some other reason costs one wasted MKD per level before failing, which is
+// the cheaper half of the trade.
+//
+// A fresh reader is built per attempt: withConn may run the whole body twice.
+func (b *Binding) storeWithDirs(ctx context.Context, c ftpclient.Conn, remotePath string, data []byte) error {
+	err := c.Store(ctx, remotePath, bytes.NewReader(data))
+	cfg, root, _ := b.snapshot()
+	if err == nil || cfg == nil || !cfg.CreateDirs || !looksLikeMissingDir(err) {
+		return err
+	}
+	dirs := pathsToCreate(root, path.Dir(remotePath))
+	if len(dirs) == 0 {
+		return err
+	}
+
+	for _, dir := range dirs {
+		if mkErr := c.MakeDir(ctx, dir); mkErr != nil {
+			if ftperr.IsConnectionLevel(mkErr) {
+				return mkErr
+			}
+			b.log.Debugf("ftp: create %q: MKD %q: %v", remotePath, dir, mkErr)
+		}
+	}
+	return c.Store(ctx, remotePath, bytes.NewReader(data))
+}
+
+// looksLikeMissingDir reports whether err might be the server refusing a write
+// because the directory above it does not exist.
+//
+// FTP has no reply code for that. vsftpd answers 553 "Could not create file."
+// for any failed open, proftpd and pure-ftpd answer 550, and all three use
+// those same codes for a permission problem. So this is a maybe, not an is: it
+// decides only whether creating the directories is worth one attempt.
+func looksLikeMissingDir(err error) bool {
+	if ftperr.IsConnectionLevel(err) {
+		return false
+	}
+	switch ftperr.Code(err) {
+	case ftperr.CodeFileUnavailable, ftperr.CodeNameNotAllowed:
+		return true
+	}
+	return false
+}
+
+// pathsToCreate returns every directory from root (exclusive) down to dir
+// (inclusive), outermost first, ready to be created one MKD at a time.
+//
+// It returns nil when dir is root itself or falls outside it. rootPath is not
+// a security boundary -- resolve deliberately does not confine request paths,
+// and the server decides what the account may reach -- but creating a
+// directory is a write, and conjuring one outside the configured working
+// directory on the strength of a "../" in a fileName is not something this
+// binding will do on its own initiative. Such a request still gets its plain
+// STOR, and the server still decides.
+func pathsToCreate(root, dir string) []string {
+	root, dir = path.Clean(root), path.Clean(dir)
+	if dir == root {
+		return nil
+	}
+	prefix := root + "/"
+	switch root {
+	case ".":
+		// A relative rootPath of "." is the login directory itself, so every
+		// relative path is below it and there is no prefix to strip.
+		if path.IsAbs(dir) {
+			return nil
+		}
+		prefix = ""
+	case "/":
+		prefix = "/"
+	}
+	if !strings.HasPrefix(dir, prefix) {
+		return nil
+	}
+	rel := strings.TrimPrefix(dir, prefix)
+	if rel == "" || rel == "." {
+		return nil
+	}
+
+	out := make([]string, 0, strings.Count(rel, "/")+1)
+	cur := root
+	for _, seg := range strings.Split(rel, "/") {
+		cur = path.Join(cur, seg)
+		out = append(out, cur)
+	}
+	return out
+}
+
+// create uploads req.Data to the resolved path. With createDirs set, missing
+// directories below rootPath are created on the way -- see storeWithDirs.
 //
 // With tempFileNamePattern set it uploads to a temp name in the same directory
 // and renames it onto the requested name, so a partner watching the folder
@@ -278,8 +376,7 @@ func (b *Binding) create(ctx context.Context, req *bindings.InvokeRequest) (*bin
 	tempPath := cfg.TempPath(remotePath)
 
 	err = b.withConn(ctx, "create", remotePath, func(ctx context.Context, c ftpclient.Conn) error {
-		// A fresh reader each attempt, because withConn may run fn twice.
-		if serr := c.Store(ctx, tempPath, bytes.NewReader(req.Data)); serr != nil {
+		if serr := b.storeWithDirs(ctx, c, tempPath, req.Data); serr != nil {
 			return serr
 		}
 		if tempPath == remotePath {

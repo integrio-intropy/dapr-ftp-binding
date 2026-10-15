@@ -182,6 +182,14 @@ func (c *jlConn) Delete(ctx context.Context, remotePath string) error {
 	return c.end(c.sc.Delete(remotePath))
 }
 
+// MakeDir issues MKD for one directory level.
+func (c *jlConn) MakeDir(ctx context.Context, remotePath string) error {
+	if err := c.begin(ctx); err != nil {
+		return err
+	}
+	return c.end(c.sc.MakeDir(remotePath))
+}
+
 // Rename issues RNFR then RNTO. Both are control-channel commands, so unlike
 // Store and Retrieve there is no data connection and no transfer type to set.
 func (c *jlConn) Rename(ctx context.Context, from, to string) error {

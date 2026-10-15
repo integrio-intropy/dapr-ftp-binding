@@ -523,3 +523,206 @@ func TestCreateRetriesTheWholeSequenceAfterAConnectionDrop(t *testing.T) {
 		t.Errorf("paths = %v, want no temp file left by the retry", paths)
 	}
 }
+
+// strictBackend is a backend that refuses a store into a directory that does
+// not exist, which is what a real server does and what createDirs answers.
+func strictBackend(dirs ...string) *fake.Backend {
+	b := fake.NewBackend()
+	b.StrictDirs = true
+	b.Mkdir("/upload")
+	for _, d := range dirs {
+		b.Mkdir(d)
+	}
+	return b
+}
+
+// The default is off: a missing directory stays an error, and the binding
+// issues exactly one STOR. Every deployment that does not ask for directory
+// creation keeps today's behaviour, including the error it already knows.
+func TestCreateDirsIsOffByDefault(t *testing.T) {
+	backend := strictBackend()
+	b := newBinding(t, backend, nil)
+	var ops []string
+	recordOps(backend, &ops)
+
+	_, err := invoke(t, b, bindings.CreateOperation, []byte("x"), map[string]string{"fileName": "a/b/c.xml"})
+	if err == nil {
+		t.Fatal("expected the store into a missing directory to fail")
+	}
+	if want := []string{"store /upload/a/b/c.xml"}; !slices.Equal(ops, want) {
+		t.Errorf("ops = %v, want %v: nothing may be created unless asked", ops, want)
+	}
+	if dirs := backend.Dirs(); !slices.Equal(dirs, []string{"/upload"}) {
+		t.Errorf("dirs = %v, want only the seeded root", dirs)
+	}
+}
+
+func TestCreateDirsCreatesTheMissingChain(t *testing.T) {
+	backend := strictBackend()
+	b := newBinding(t, backend, map[string]string{"createDirs": "true"})
+	var ops []string
+	recordOps(backend, &ops)
+
+	if _, err := invoke(t, b, bindings.CreateOperation, []byte("x"), map[string]string{"fileName": "a/b/c.xml"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// The first store is the probe: it is cheaper than walking a tree that is
+	// almost always already there.
+	want := []string{
+		"store /upload/a/b/c.xml",
+		"mkdir /upload/a",
+		"mkdir /upload/a/b",
+		"store /upload/a/b/c.xml",
+	}
+	if !slices.Equal(ops, want) {
+		t.Errorf("ops = %v, want %v", ops, want)
+	}
+	if got, ok := backend.Get("/upload/a/b/c.xml"); !ok || string(got) != "x" {
+		t.Errorf("stored = %q (ok=%v), want x", got, ok)
+	}
+	if dirs := backend.Dirs(); !slices.Equal(dirs, []string{"/upload", "/upload/a", "/upload/a/b"}) {
+		t.Errorf("dirs = %v", dirs)
+	}
+}
+
+// The common case -- the folder is there, which is every request after the
+// first -- must not pay for the feature.
+func TestCreateDirsCostsNothingWhenTheDirectoryExists(t *testing.T) {
+	backend := strictBackend("/upload/a/b")
+	b := newBinding(t, backend, map[string]string{"createDirs": "true"})
+	var ops []string
+	recordOps(backend, &ops)
+
+	if _, err := invoke(t, b, bindings.CreateOperation, []byte("x"), map[string]string{"fileName": "a/b/c.xml"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if want := []string{"store /upload/a/b/c.xml"}; !slices.Equal(ops, want) {
+		t.Errorf("ops = %v, want %v: a single store with no MKD", ops, want)
+	}
+}
+
+// Only part of the chain is missing. MKD on a level that already exists fails,
+// and that failure must be shrugged off rather than aborting the walk.
+func TestCreateDirsWalksPastLevelsThatAlreadyExist(t *testing.T) {
+	backend := strictBackend("/upload/a")
+	b := newBinding(t, backend, map[string]string{"createDirs": "true"})
+	var ops []string
+	recordOps(backend, &ops)
+
+	if _, err := invoke(t, b, bindings.CreateOperation, []byte("x"), map[string]string{"fileName": "a/b/c.xml"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	want := []string{
+		"store /upload/a/b/c.xml",
+		"mkdir /upload/a", // refused: already there
+		"mkdir /upload/a/b",
+		"store /upload/a/b/c.xml",
+	}
+	if !slices.Equal(ops, want) {
+		t.Errorf("ops = %v, want %v", ops, want)
+	}
+}
+
+// With both features on, the temp file is written into the directory that was
+// just created and the rename still lands the final name.
+func TestCreateDirsWithTempFileNamePattern(t *testing.T) {
+	backend := strictBackend()
+	b := newBinding(t, backend, map[string]string{
+		"createDirs":          "true",
+		"tempFileNamePattern": "{name}.tmp",
+	})
+	var ops []string
+	recordOps(backend, &ops)
+
+	if _, err := invoke(t, b, bindings.CreateOperation, []byte("x"), map[string]string{"fileName": "a/b/c.xml"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	want := []string{
+		"store /upload/a/b/c.xml.tmp",
+		"mkdir /upload/a",
+		"mkdir /upload/a/b",
+		"store /upload/a/b/c.xml.tmp",
+		"rename /upload/a/b/c.xml.tmp",
+	}
+	if !slices.Equal(ops, want) {
+		t.Errorf("ops = %v, want %v", ops, want)
+	}
+	if paths := backend.Paths(); !slices.Equal(paths, []string{"/upload/a/b/c.xml"}) {
+		t.Errorf("paths = %v, want only the final name", paths)
+	}
+}
+
+// A refusal that is not about a missing directory -- no write permission, say
+// -- must still reach the caller with the server's own words, after one
+// attempt at the directories that cannot tell the difference.
+func TestCreateDirsStillSurfacesARefusal(t *testing.T) {
+	backend := strictBackend("/upload/a/b")
+	var mu sync.Mutex
+	var ops []string
+	backend.FailNext = func(op, p string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		ops = append(ops, op+" "+p)
+		if op == "store" {
+			return &textproto.Error{Code: ftperr.CodeNameNotAllowed, Msg: "Could not create file."}
+		}
+		return nil
+	}
+	b := newBinding(t, backend, map[string]string{"createDirs": "true"})
+
+	_, err := invoke(t, b, bindings.CreateOperation, []byte("x"), map[string]string{"fileName": "a/b/c.xml"})
+	if err == nil {
+		t.Fatal("expected the refusal to reach the caller")
+	}
+	if !strings.Contains(err.Error(), "Could not create file.") {
+		t.Errorf("error = %v, want the server's own message", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if n := len(ops); n != 4 {
+		t.Errorf("ops = %v, want one store, two mkdirs and one more store", ops)
+	}
+}
+
+// A fileName that climbs out of rootPath still gets its plain STOR -- paths
+// are not confined, the server decides -- but the binding will not create
+// directories outside its own working directory to make it work.
+func TestCreateDirsNeverCreatesAboveRoot(t *testing.T) {
+	backend := strictBackend()
+	b := newBinding(t, backend, map[string]string{"createDirs": "true"})
+	var ops []string
+	recordOps(backend, &ops)
+
+	_, err := invoke(t, b, bindings.CreateOperation, []byte("x"), map[string]string{"fileName": "../elsewhere/c.xml"})
+	if err == nil {
+		t.Fatal("expected the store outside rootPath to fail")
+	}
+	if want := []string{"store /elsewhere/c.xml"}; !slices.Equal(ops, want) {
+		t.Errorf("ops = %v, want %v: a single store and no MKD", ops, want)
+	}
+}
+
+func TestPathsToCreate(t *testing.T) {
+	tests := []struct {
+		name, root, dir string
+		want            []string
+	}{
+		{"nested below root", "/upload", "/upload/a/b", []string{"/upload/a", "/upload/a/b"}},
+		{"one level", "/upload", "/upload/a", []string{"/upload/a"}},
+		{"the root itself", "/upload", "/upload", nil},
+		{"outside root", "/upload", "/elsewhere/a", nil},
+		{"a sibling with a shared prefix", "/upload", "/uploads/a", nil},
+		{"an absolute root of /", "/", "/a/b", []string{"/a", "/a/b"}},
+		{"a relative root", "integration/input", "integration/input/IQPL/Forecast",
+			[]string{"integration/input/IQPL", "integration/input/IQPL/Forecast"}},
+		{"the login directory as root", ".", "a/b", []string{"a", "a/b"}},
+		{"an absolute path under a relative root", ".", "/a/b", nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pathsToCreate(tc.root, tc.dir); !slices.Equal(got, tc.want) {
+				t.Errorf("pathsToCreate(%q, %q) = %v, want %v", tc.root, tc.dir, got, tc.want)
+			}
+		})
+	}
+}

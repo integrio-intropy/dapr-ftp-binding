@@ -277,3 +277,48 @@ func TestRenameMissingSourceReports550(t *testing.T) {
 		t.Error("a 550 is the server's answer, not a transport failure; the session is still usable")
 	}
 }
+
+// MKD is wired through and creates one level. The fake-driven tests above the
+// seam cannot cover this: only a real server decides what MKD means.
+func TestMakeDirCreatesOneLevel(t *testing.T) {
+	ts := startServer(t, serverOpts{})
+	c := connect(t, ts, TLSNone, nil)
+	ctx := context.Background()
+
+	if err := c.MakeDir(ctx, "/upload/sub"); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	entries, err := c.List(ctx, "/upload")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if !hasEntry(entries, "sub") {
+		t.Fatalf("list = %+v, want sub", entries)
+	}
+	if err := c.Store(ctx, "/upload/sub/a.dat", bytes.NewReader(binaryPayload)); err != nil {
+		t.Fatalf("store into the new directory: %v", err)
+	}
+}
+
+// Creating a directory that is already there is a refusal, not a no-op. The
+// binding depends on that being command-level: it walks a whole chain and
+// expects the levels that already exist to fail harmlessly.
+func TestMakeDirOnAnExistingDirectoryIsCommandLevel(t *testing.T) {
+	ts := startServer(t, serverOpts{})
+	c := connect(t, ts, TLSNone, nil)
+	ctx := context.Background()
+
+	if err := c.MakeDir(ctx, "/upload/sub"); err != nil {
+		t.Fatalf("first mkdir: %v", err)
+	}
+	if err := c.MakeDir(ctx, "/upload/sub"); err == nil {
+		t.Error("expected an error creating a directory that already exists")
+	}
+	if c.Broken() {
+		t.Fatal("a refused MKD must leave the session usable")
+	}
+	// Still usable, which is what lets the binding keep walking the chain.
+	if err := c.Store(ctx, "/upload/sub/a.dat", bytes.NewReader(binaryPayload)); err != nil {
+		t.Fatalf("store after the refused mkdir: %v", err)
+	}
+}

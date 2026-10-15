@@ -46,3 +46,7 @@ spec:
     # mid-upload. Confirm the server supports RNFR/RNTO.
     # - name: tempFileNamePattern
     #   value: "{name}.tmp"
+    # Optional, off by default. Create the directories under rootPath that a
+    # create needs, instead of failing when they are missing.
+    # - name: createDirs
+    #   value: "true"

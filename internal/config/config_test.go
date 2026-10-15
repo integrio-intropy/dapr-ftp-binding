@@ -256,3 +256,27 @@ func TestTempFileNamePatternRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestCreateDirsDefaultsToOff(t *testing.T) {
+	cfg, _, err := Parse(base())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.CreateDirs {
+		t.Error("CreateDirs must be off unless asked for: creating directories is a write")
+	}
+}
+
+func TestCreateDirsParsed(t *testing.T) {
+	for _, key := range []string{"createDirs", "CREATEDIRS", "createdirs"} {
+		props := base()
+		props[key] = "true"
+		cfg, _, err := Parse(props)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", key, err)
+		}
+		if !cfg.CreateDirs {
+			t.Errorf("%s=true did not enable CreateDirs", key)
+		}
+	}
+}
