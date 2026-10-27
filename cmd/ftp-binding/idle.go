@@ -1,12 +1,11 @@
 package main
 
 import (
-	"context"
 	"fmt"
+	"net"
+	"os"
 	"sync"
 	"time"
-
-	"google.golang.org/grpc/stats"
 )
 
 // idleWatcher reports when the sidecar has gone away -- or never arrived -- so
@@ -20,18 +19,21 @@ import (
 // never completes. Nothing sends us a signal: the kubelet only does that when
 // the pod is being torn down, which is precisely what is not happening.
 //
-// The signal we use is the sidecar's gRPC connection to our socket. daprd dials
-// it while loading the component and holds it open for the life of the process,
-// so losing every connection means the sidecar is gone.
+// The signal is daprd's HTTP port on localhost, which every container in a pod
+// shares and which daprd listens on for as long as it runs. Our own gRPC
+// socket is NOT a usable signal for this, despite looking like one: grpc-go's
+// client-side connection idling closes daprd's connection to us after about
+// 30 minutes without an Invoke call, then reconnects transparently on the next
+// one -- ordinary behaviour that has nothing to do with whether the sidecar is
+// still alive. Watching our own socket for "every connection closed" mistakes
+// that routine idle-and-reconnect cycle for the sidecar vanishing, and exits
+// a component that a live app is about to call again. (dapr-smb-binding hit
+// this first; its idle.py documents the same 30-minute figure.)
 //
-// A sidecar that never connects at all needs its own answer. If daprd starts
-// before our socket exists it fails with "couldn't find binding" and dies,
-// leaving us listening on a socket nobody will ever dial -- the disconnect we
-// are waiting for cannot happen, because there was never a connection. With no
-// connection to go on there is nothing to distinguish that from a daprd that is
-// merely slow to start, so the only available signal is the clock: startWait
-// bounds how long we hold the socket open for a sidecar that has never shown
-// up.
+// A sidecar that never shows up at all is folded into the same signal: if
+// daprd never starts, or dies before reaching us, its HTTP port never answers
+// either, so "never seen running" and "seen running, then gone" are just two
+// branches of one poll loop.
 //
 // It is off by default, and must be off for Deployments: there a sidecar
 // restart is routine, and the component has to still be listening afterwards.
@@ -40,43 +42,56 @@ type idleWatcher struct {
 	startWait time.Duration
 	fired     chan string
 
-	mu     sync.Mutex
-	active int
-	// seen records that the sidecar has connected at least once, which retires
-	// startWait: from then on a disconnect is the signal and timeout the clock.
-	seen  bool
-	timer *time.Timer
+	// running reports whether daprd looks alive. A field rather than a free
+	// function so tests can substitute a fake without touching a real port.
+	running func() bool
+	// pollInterval paces the check. A field for the same reason: tests shrink
+	// it so the suite does not take minutes to run the real intervals.
+	pollInterval time.Duration
+
+	once sync.Once
 }
 
+// daprHTTPPortEnv is how the Dapr injector tells every container in the pod
+// which port daprd's HTTP API listens on.
+const daprHTTPPortEnv = "DAPR_HTTP_PORT"
+
+// defaultDaprHTTPPort is what the injector uses when it has not overridden it.
+const defaultDaprHTTPPort = "3500"
+
+const (
+	defaultPollInterval = 1 * time.Second
+	dialTimeout         = 1 * time.Second
+)
+
 // newIdleWatcher returns nil when the timeout is zero, which disables the
-// behaviour: a nil watcher is never registered with the gRPC server, and its
-// Fired channel blocks forever. A zero startWait leaves a component whose
-// sidecar never connects running indefinitely.
+// behaviour: a nil watcher's Fired channel blocks forever. A zero startWait
+// leaves a component whose sidecar never shows up running indefinitely.
 func newIdleWatcher(timeout, startWait time.Duration) *idleWatcher {
 	if timeout <= 0 {
 		return nil
 	}
-	return &idleWatcher{timeout: timeout, startWait: startWait, fired: make(chan string, 1)}
+	return &idleWatcher{
+		timeout:      timeout,
+		startWait:    startWait,
+		fired:        make(chan string, 1),
+		running:      sidecarRunning,
+		pollInterval: defaultPollInterval,
+	}
 }
 
-// Start begins the wait for the sidecar's first connection. The run loop calls
-// it once the listener is up, so the window covers only the time the socket is
-// actually dialable.
+// Start begins polling for daprd. Safe to call on a nil watcher, and more than
+// once on the same one.
 func (w *idleWatcher) Start() {
-	if w == nil || w.startWait <= 0 {
+	if w == nil {
 		return
 	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.seen || w.timer != nil {
-		return
-	}
-	w.timer = w.arm(w.startWait, fmt.Sprintf("the sidecar never connected within %s", w.startWait))
+	w.once.Do(func() { go w.watch() })
 }
 
-// Fired is closed-over by the run loop and yields the reason to log. A nil
-// channel blocks forever in a select, which is exactly what a disabled watcher
-// should do.
+// Fired yields the reason to log once the watcher decides the sidecar is
+// gone. A nil channel blocks forever in a select, which is exactly what a
+// disabled watcher should do.
 func (w *idleWatcher) Fired() <-chan string {
 	if w == nil {
 		return nil
@@ -84,56 +99,65 @@ func (w *idleWatcher) Fired() <-chan string {
 	return w.fired
 }
 
-func (w *idleWatcher) HandleConn(_ context.Context, s stats.ConnStats) {
-	switch s.(type) {
-	case *stats.ConnBegin:
-		w.mu.Lock()
-		w.active++
-		w.seen = true
-		// Discovery connects, calls the reflection API and disconnects before
-		// the sidecar dials again to initialise the component. Re-arming on
-		// every new connection keeps that gap from counting as the sidecar
-		// having gone away. This also disarms the startWait timer.
-		if w.timer != nil {
-			w.timer.Stop()
-			w.timer = nil
+// watch polls daprd until it decides the sidecar is gone for good, then exits.
+//
+// seen retires the startup wait: from then on, a quiet daprd is the idle
+// timeout's problem, not the startup wait's.
+func (w *idleWatcher) watch() {
+	t := time.NewTicker(w.pollInterval)
+	defer t.Stop()
+
+	start := time.Now()
+	var seen bool
+	var goneSince time.Time
+
+	for range t.C {
+		if w.running() {
+			seen = true
+			goneSince = time.Time{}
+			continue
 		}
-		w.mu.Unlock()
-	case *stats.ConnEnd:
-		w.mu.Lock()
-		if w.active > 0 {
-			w.active--
+
+		if !seen {
+			if w.startWait > 0 && time.Since(start) >= w.startWait {
+				w.fire(fmt.Sprintf("the sidecar never connected within %s", w.startWait))
+				return
+			}
+			continue
 		}
-		if w.active == 0 && w.seen && w.timer == nil {
-			w.timer = w.arm(w.timeout, fmt.Sprintf("no sidecar connection for %s", w.timeout))
+
+		if goneSince.IsZero() {
+			goneSince = time.Now()
+			continue
 		}
-		w.mu.Unlock()
+		if time.Since(goneSince) >= w.timeout {
+			w.fire(fmt.Sprintf("no sidecar connection for %s", w.timeout))
+			return
+		}
 	}
 }
 
-// arm must be called with the mutex held.
-func (w *idleWatcher) arm(d time.Duration, reason string) *time.Timer {
-	return time.AfterFunc(d, func() { w.expire(reason) })
-}
-
-func (w *idleWatcher) expire(reason string) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	// A connection arriving between the timer firing and this lock means the
-	// sidecar is here; Stop() alone cannot rule that out.
-	if w.active > 0 {
-		return
-	}
+func (w *idleWatcher) fire(reason string) {
 	select {
 	case w.fired <- reason:
 	default:
 	}
 }
 
-// The rest of stats.Handler. Only connection events matter here, and the
-// per-RPC ones must stay cheap: they run on every request.
-func (w *idleWatcher) TagConn(ctx context.Context, _ *stats.ConnTagInfo) context.Context { return ctx }
-func (w *idleWatcher) TagRPC(ctx context.Context, _ *stats.RPCTagInfo) context.Context   { return ctx }
-func (w *idleWatcher) HandleRPC(context.Context, stats.RPCStats)                         {}
-
-var _ stats.Handler = (*idleWatcher)(nil)
+// sidecarRunning reports whether daprd's HTTP API port is accepting
+// connections on localhost. That port is up for as long as daprd runs,
+// independent of whether it currently holds a connection to our socket.
+func sidecarRunning() bool {
+	port := os.Getenv(daprHTTPPortEnv)
+	if port == "" {
+		port = defaultDaprHTTPPort
+	}
+	//nolint:gosec // G704: the host is the literal "127.0.0.1"; port comes from the
+	// pod's own DAPR_HTTP_PORT, set by the Dapr injector, not external input.
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), dialTimeout)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}

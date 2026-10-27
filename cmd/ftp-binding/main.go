@@ -69,8 +69,8 @@ func main() {
 		socketPerm  = flag.String("socket-perm", "0660", "permission bits for the socket file, in octal")
 		maxMsgSize  = flag.Int("max-message-size", defaultMaxMessageSize, "maximum gRPC message size in bytes; raise alongside the sidecar's --max-body-size")
 		logLevel    = flag.String("log-level", "info", "log level: debug, info, warn or error")
-		exitIdle    = flag.Duration("exit-when-idle", 0, "exit once the sidecar has connected and then stayed disconnected for this long; for Job and CronJob pods, where a component left running keeps the Job from completing. Leave at 0 for Deployments")
-		startWait   = flag.Duration("exit-when-no-sidecar", defaultStartWait, "with -exit-when-idle, also exit if no sidecar ever connects within this long after the socket is up, which is what happens when daprd dies before reaching us. 0 waits forever")
+		exitIdle    = flag.Duration("exit-when-idle", 0, "exit once daprd's HTTP port has answered and then gone quiet for this long; for Job and CronJob pods, where a component left running keeps the Job from completing. Leave at 0 for Deployments")
+		startWait   = flag.Duration("exit-when-no-sidecar", defaultStartWait, "with -exit-when-idle, also exit if daprd's HTTP port never answers within this long, which is what happens when daprd dies before reaching us. 0 waits forever")
 		showVersion = flag.Bool("version", false, "print the version and exit")
 	)
 	flag.Parse()
@@ -164,10 +164,9 @@ func run(log logger.Logger, socketName string, perm os.FileMode, maxMsgSize int,
 	}
 	idle := newIdleWatcher(exitWhenIdle, startWait)
 	if idle != nil {
-		serverOpts = append(serverOpts, grpc.StatsHandler(idle))
-		log.Infof("will exit %s after the sidecar disconnects", exitWhenIdle)
+		log.Infof("will exit %s after daprd's HTTP port stops answering", exitWhenIdle)
 		if startWait > 0 {
-			log.Infof("will exit if no sidecar connects within %s", startWait)
+			log.Infof("will exit if daprd's HTTP port never answers within %s", startWait)
 		}
 	}
 	server := grpc.NewServer(serverOpts...)
@@ -188,8 +187,8 @@ func run(log logger.Logger, socketName string, perm os.FileMode, maxMsgSize int,
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(lis) }()
 
-	// Only now is the socket dialable, so this is where the wait for the
-	// sidecar's first connection starts.
+	// Starts the poll for daprd's HTTP port. It does not depend on our own
+	// socket being dialable, but there is no reason to start it earlier.
 	idle.Start()
 
 	sig := make(chan os.Signal, 1)
