@@ -68,7 +68,30 @@ reach Dapr; this flag deliberately does not turn a missing sidecar into a
 failure, because it cannot tell one from a sidecar that was simply never going
 to arrive on this pod.
 
-Give it a **separate Component** from the one your Deployments use, scoped to
-the Job's app-ids. The flag lives on the container, so every pod that injects
-that Component inherits it, and in a Deployment an ordinary sidecar restart
-would then take the component down with it.
+`-exit-when-idle` lives on the container, so every pod that injects the
+Component inherits it — and in a Deployment an ordinary sidecar restart would
+then take the component down with it. Two ways to avoid that:
+
+- **Give Jobs a separate Component**, scoped to their app-ids with `scopes`,
+  and leave `-exit-when-idle` off the one your Deployments use.
+- **Share one Component**, and let each pod opt out with the
+  `FTP_BINDING_EXIT_WHEN_IDLE` env var. Bake `-exit-when-idle 30s` into the
+  Component's args as the default for Jobs and CronJobs, then map a pod
+  annotation to that env var via the Kubernetes Downward API so a Deployment's
+  pod can turn it off:
+
+  ```json
+  "env": [{
+    "name": "FTP_BINDING_EXIT_WHEN_IDLE",
+    "valueFrom": { "fieldRef": { "fieldPath": "metadata.annotations['ftp-binding.intropy.io/exit-when-idle']" } }
+  }]
+  ```
+
+  ```yaml
+  annotations:
+    ftp-binding.intropy.io/exit-when-idle: "off"
+  ```
+
+  A pod without the annotation (a Job) falls through to the Component's own
+  `-exit-when-idle`; one with it set to `off` disables idle-exit for that pod
+  alone. See `component.yaml` and `deployment.yaml` for the full wiring.

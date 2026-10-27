@@ -202,10 +202,15 @@ the process itself is hosted.
 | `-socket-perm` | `0660` | Permission bits for the socket, **read as octal** whether or not you write the leading zero. |
 | `-max-message-size` | `5242880` | Maximum gRPC message in bytes. Raise alongside the sidecar's `--max-body-size`; |
 | `-log-level` | `info` | `debug`, `info`, `warn` or `error`. |
-| `-exit-when-idle` | `0` (off) | Exit once daprd's HTTP port has answered and then gone quiet for this long. For Jobs and CronJobs; see the Kubernetes example. Leave off for Deployments. |
+| `-exit-when-idle` | `0` (off) | Exit once daprd's HTTP port has answered and then gone quiet for this long. For Jobs and CronJobs; see the Kubernetes example. Leave off for Deployments. Overridable per pod with `FTP_BINDING_EXIT_WHEN_IDLE`. |
 | `-exit-when-no-sidecar` | `1m` | With `-exit-when-idle`, also exit if daprd's HTTP port never answers within this long — the case where daprd died before reaching us. `0` waits forever. Ignored without `-exit-when-idle`. |
 | `-version` | | Print the version and exit. |
 
+`FTP_BINDING_EXIT_WHEN_IDLE` overrides `-exit-when-idle` for one pod without a
+second Component resource: a value like `30s` sets the idle timeout, `off`
+disables it, and unset or empty keeps the Component's own default. This is
+what lets a Deployment and a Job share one Component — see the Kubernetes
+example.
 
 ## Security
 
