@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/integrio-intropy/dapr-ftp-binding/internal/config"
 	"github.com/integrio-intropy/dapr-ftp-binding/internal/ftpclient"
@@ -105,5 +106,71 @@ func TestSocketFolderFallsBackThroughTheSDKSpellings(t *testing.T) {
 	t.Setenv(socketFolderEnvLegacy, "")
 	if got := socketFolder(); got != defaultSocketFolder {
 		t.Errorf("socketFolder() = %q, want %q", got, defaultSocketFolder)
+	}
+}
+
+// The point of the env override: one Component image serves both a Job, whose
+// args bake in -exit-when-idle, and a Deployment's pod, which turns it off
+// through an annotation mapped to this env var by the Downward API -- see the
+// Kubernetes example.
+func TestResolveExitWhenIdleUnsetKeepsTheFlagDefault(t *testing.T) {
+	if old, had := os.LookupEnv(exitWhenIdleEnv); had {
+		_ = os.Unsetenv(exitWhenIdleEnv)
+		t.Cleanup(func() { _ = os.Setenv(exitWhenIdleEnv, old) })
+	}
+	got, err := resolveExitWhenIdle(30 * time.Second)
+	if err != nil {
+		t.Fatalf("resolveExitWhenIdle: %v", err)
+	}
+	if got != 30*time.Second {
+		t.Errorf("resolveExitWhenIdle(30s) with the env unset = %s, want 30s", got)
+	}
+}
+
+func TestResolveExitWhenIdleEmptyKeepsTheFlagDefault(t *testing.T) {
+	t.Setenv(exitWhenIdleEnv, "")
+	got, err := resolveExitWhenIdle(30 * time.Second)
+	if err != nil {
+		t.Fatalf("resolveExitWhenIdle: %v", err)
+	}
+	if got != 30*time.Second {
+		t.Errorf("resolveExitWhenIdle(30s) with the env empty = %s, want 30s", got)
+	}
+}
+
+func TestResolveExitWhenIdleOffDisablesIt(t *testing.T) {
+	for _, v := range []string{"off", "Off", "OFF", "  off  "} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv(exitWhenIdleEnv, v)
+			got, err := resolveExitWhenIdle(30 * time.Second)
+			if err != nil {
+				t.Fatalf("resolveExitWhenIdle: %v", err)
+			}
+			if got != 0 {
+				t.Errorf("resolveExitWhenIdle with %s=%q = %s, want 0 (off)", exitWhenIdleEnv, v, got)
+			}
+		})
+	}
+}
+
+func TestResolveExitWhenIdleParsesADuration(t *testing.T) {
+	t.Setenv(exitWhenIdleEnv, "5m")
+	got, err := resolveExitWhenIdle(30 * time.Second)
+	if err != nil {
+		t.Fatalf("resolveExitWhenIdle: %v", err)
+	}
+	if got != 5*time.Minute {
+		t.Errorf("resolveExitWhenIdle with %s=5m = %s, want 5m", exitWhenIdleEnv, got)
+	}
+}
+
+func TestResolveExitWhenIdleRejectsGarbage(t *testing.T) {
+	for _, v := range []string{"30", "soon", "-5s"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv(exitWhenIdleEnv, v)
+			if _, err := resolveExitWhenIdle(30 * time.Second); err == nil {
+				t.Errorf("resolveExitWhenIdle with %s=%q = nil error, want one", exitWhenIdleEnv, v)
+			}
+		})
 	}
 }

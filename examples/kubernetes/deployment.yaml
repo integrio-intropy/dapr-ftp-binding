@@ -17,6 +17,9 @@ spec:
         dapr.io/app-port: "8080"
         # Required for the component container to be injected automatically.
         dapr.io/inject-pluggable-components: "true"
+        # The Component's -exit-when-idle is for Jobs. Here a sidecar restart
+        # is routine and the binding has to keep listening.
+        ftp-binding.intropy.io/exit-when-idle: "off"
     spec:
       containers:
         - name: app

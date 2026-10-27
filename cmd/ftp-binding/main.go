@@ -61,6 +61,15 @@ const (
 
 	shutdownGrace    = 10 * time.Second
 	defaultStartWait = 1 * time.Minute
+
+	// exitWhenIdleEnv lets one pod override the Component's -exit-when-idle
+	// default without a second Component resource. The Component sets its own
+	// default in -exit-when-idle (on, for Jobs and CronJobs that share this
+	// image), and a pod that needs the opposite -- a Deployment, where a
+	// sidecar restart is routine -- sets this env var via the Kubernetes
+	// Downward API from a pod annotation. See the Kubernetes example.
+	exitWhenIdleEnv = "FTP_BINDING_EXIT_WHEN_IDLE"
+	exitWhenIdleOff = "off"
 )
 
 func main() {
@@ -69,8 +78,8 @@ func main() {
 		socketPerm  = flag.String("socket-perm", "0660", "permission bits for the socket file, in octal")
 		maxMsgSize  = flag.Int("max-message-size", defaultMaxMessageSize, "maximum gRPC message size in bytes; raise alongside the sidecar's --max-body-size")
 		logLevel    = flag.String("log-level", "info", "log level: debug, info, warn or error")
-		exitIdle    = flag.Duration("exit-when-idle", 0, "exit once the sidecar has connected and then stayed disconnected for this long; for Job and CronJob pods, where a component left running keeps the Job from completing. Leave at 0 for Deployments")
-		startWait   = flag.Duration("exit-when-no-sidecar", defaultStartWait, "with -exit-when-idle, also exit if no sidecar ever connects within this long after the socket is up, which is what happens when daprd dies before reaching us. 0 waits forever")
+		exitIdle    = flag.Duration("exit-when-idle", 0, "exit once daprd's HTTP port has answered and then gone quiet for this long; for Job and CronJob pods, where a component left running keeps the Job from completing. Leave at 0 for Deployments. A pod overrides this with the "+exitWhenIdleEnv+" env var, e.g. \"off\"")
+		startWait   = flag.Duration("exit-when-no-sidecar", defaultStartWait, "with -exit-when-idle, also exit if daprd's HTTP port never answers within this long, which is what happens when daprd dies before reaching us. 0 waits forever")
 		showVersion = flag.Bool("version", false, "print the version and exit")
 	)
 	flag.Parse()
@@ -100,9 +109,45 @@ func main() {
 		log.Fatalf("invalid -socket-perm: %v", err)
 	}
 
-	if err := run(log, *socketName, perm, *maxMsgSize, *exitIdle, *startWait); err != nil {
+	exitIdleResolved, err := resolveExitWhenIdle(*exitIdle)
+	if err != nil {
+		log.Fatalf("invalid %s: %v", exitWhenIdleEnv, err)
+	}
+	if exitIdleResolved != *exitIdle {
+		log.Infof("%s overrides -exit-when-idle %s with %s", exitWhenIdleEnv, *exitIdle, exitIdleResolved)
+	}
+
+	if err := run(log, *socketName, perm, *maxMsgSize, exitIdleResolved, *startWait); err != nil {
 		log.Fatalf("ftp binding failed: %v", err)
 	}
+}
+
+// resolveExitWhenIdle applies the pod's FTP_BINDING_EXIT_WHEN_IDLE override, if
+// any, on top of the Component's own -exit-when-idle default.
+//
+// Unset or empty keeps flagDefault, so a pod without the annotation gets
+// whatever the Component was built with. "off" (case-insensitive) disables
+// idle-exit outright -- the normal case for a Deployment sharing a Component
+// with Jobs. Anything else must be a Go duration ("30s", "5m"); a bare number
+// or a typo fails the component at startup rather than silently keeping it
+// running forever or exiting immediately.
+func resolveExitWhenIdle(flagDefault time.Duration) (time.Duration, error) {
+	value, ok := os.LookupEnv(exitWhenIdleEnv)
+	value = strings.TrimSpace(value)
+	if !ok || value == "" {
+		return flagDefault, nil
+	}
+	if strings.EqualFold(value, exitWhenIdleOff) {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a valid duration (for example \"30s\") or %q: %w", value, exitWhenIdleOff, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("%q must not be negative", value)
+	}
+	return d, nil
 }
 
 // parsePerm reads permission bits as octal, whether or not they carry a leading
@@ -164,10 +209,9 @@ func run(log logger.Logger, socketName string, perm os.FileMode, maxMsgSize int,
 	}
 	idle := newIdleWatcher(exitWhenIdle, startWait)
 	if idle != nil {
-		serverOpts = append(serverOpts, grpc.StatsHandler(idle))
-		log.Infof("will exit %s after the sidecar disconnects", exitWhenIdle)
+		log.Infof("will exit %s after daprd's HTTP port stops answering", exitWhenIdle)
 		if startWait > 0 {
-			log.Infof("will exit if no sidecar connects within %s", startWait)
+			log.Infof("will exit if daprd's HTTP port never answers within %s", startWait)
 		}
 	}
 	server := grpc.NewServer(serverOpts...)
@@ -188,8 +232,8 @@ func run(log logger.Logger, socketName string, perm os.FileMode, maxMsgSize int,
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(lis) }()
 
-	// Only now is the socket dialable, so this is where the wait for the
-	// sidecar's first connection starts.
+	// Starts the poll for daprd's HTTP port. It does not depend on our own
+	// socket being dialable, but there is no reason to start it earlier.
 	idle.Start()
 
 	sig := make(chan os.Signal, 1)

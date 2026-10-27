@@ -1,26 +1,21 @@
 package main
 
 import (
-	"context"
 	"net"
-	"os"
-	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
-
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/connectivity"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/stats"
 )
 
 // quick is long enough not to be flaky on a loaded CI runner, short enough that
 // the whole file runs in well under a second.
 const quick = 150 * time.Millisecond
 
-func begin(w *idleWatcher) { w.HandleConn(context.Background(), &stats.ConnBegin{}) }
-func end(w *idleWatcher)   { w.HandleConn(context.Background(), &stats.ConnEnd{}) }
+// fakeSidecar is a controllable stand-in for sidecarRunning.
+type fakeSidecar struct{ up atomic.Bool }
+
+func (f *fakeSidecar) running() bool { return f.up.Load() }
 
 // fired waits up to d for the watcher to report an idle sidecar.
 func fired(t *testing.T, w *idleWatcher, d time.Duration) bool {
@@ -33,10 +28,11 @@ func fired(t *testing.T, w *idleWatcher, d time.Duration) bool {
 	}
 }
 
-// started builds a watcher with the startup wait armed, as the run loop does
-// once the socket is listening.
-func started(timeout, startWait time.Duration) *idleWatcher {
+// started builds a watcher polling a fake sidecar at test speed, and starts it.
+func started(timeout, startWait time.Duration, sc *fakeSidecar) *idleWatcher {
 	w := newIdleWatcher(timeout, startWait)
+	w.running = sc.running
+	w.pollInterval = quick / 10
 	w.Start()
 	return w
 }
@@ -54,31 +50,34 @@ func TestZeroTimeoutDisablesTheWatcher(t *testing.T) {
 	}
 }
 
-// The component may be running for a while before daprd dials it. Firing after
-// the idle timeout alone would turn a slow sidecar start into a vanished
-// component: before the first connection it is the longer startup wait that
-// applies.
-func TestDoesNotFireOnTheIdleTimeoutBeforeTheSidecarHasEverConnected(t *testing.T) {
-	w := started(quick, 100*quick)
+// The component may be running for a while before daprd's HTTP port answers.
+// Firing on the idle timeout alone would turn a slow sidecar start into a
+// vanished component: before the first sighting it is the longer startup wait
+// that applies.
+func TestDoesNotFireOnTheIdleTimeoutBeforeTheSidecarHasEverBeenSeen(t *testing.T) {
+	sc := &fakeSidecar{}
+	w := started(quick, 100*quick, sc)
 	if fired(t, w, 4*quick) {
-		t.Fatal("fired on the idle timeout before any connection was seen")
+		t.Fatal("fired on the idle timeout before the sidecar was ever seen")
 	}
 }
 
-// A zero startup wait keeps the old behaviour: hold the socket open forever for
-// a sidecar that may yet arrive.
-func TestZeroStartWaitWaitsForeverForTheFirstConnection(t *testing.T) {
-	w := started(quick, 0)
+// A zero startup wait keeps the old behaviour: hold the socket open forever
+// for a sidecar that may yet arrive.
+func TestZeroStartWaitWaitsForeverForTheFirstSighting(t *testing.T) {
+	sc := &fakeSidecar{}
+	w := started(quick, 0, sc)
 	if fired(t, w, 6*quick) {
 		t.Fatal("fired although the startup wait was disabled")
 	}
 }
 
-// The case this is all for: daprd dies before it ever dials us -- typically
-// because it scanned the socket folder before our socket existed -- so no
-// disconnect is ever coming. Without this the Job runs forever.
-func TestFiresWhenTheSidecarNeverConnects(t *testing.T) {
-	w := started(100*quick, quick)
+// The case this is all for: daprd dies before its HTTP port ever answers --
+// typically because it died before reaching this container at all -- so no
+// sighting is ever coming. Without this the Job runs forever.
+func TestFiresWhenTheSidecarIsNeverSeen(t *testing.T) {
+	sc := &fakeSidecar{}
+	w := started(100*quick, quick, sc)
 	select {
 	case reason := <-w.Fired():
 		// The reason is logged as the process exits, and is the only clue an
@@ -87,117 +86,107 @@ func TestFiresWhenTheSidecarNeverConnects(t *testing.T) {
 			t.Fatalf("reason = %q, want it to say the sidecar never connected", reason)
 		}
 	case <-time.After(20 * quick):
-		t.Fatal("did not fire although no sidecar ever connected")
+		t.Fatal("did not fire although the sidecar was never seen")
 	}
 }
 
-// A sidecar that arrives within the startup wait disarms it for good: from then
-// on only a disconnect plus the idle timeout may fire.
-func TestTheFirstConnectionDisarmsTheStartupWait(t *testing.T) {
-	w := started(100*quick, 2*quick)
-	begin(w)
+// A sidecar seen within the startup wait disarms it for good: from then on
+// only it going quiet plus the idle timeout may fire.
+func TestTheFirstSightingDisarmsTheStartupWait(t *testing.T) {
+	sc := &fakeSidecar{}
+	w := started(100*quick, 2*quick, sc)
+	sc.up.Store(true)
 	if fired(t, w, 6*quick) {
-		t.Fatal("fired on the startup wait although the sidecar had connected")
+		t.Fatal("fired on the startup wait although the sidecar had been seen")
 	}
 }
 
-// Disconnecting before the startup wait would have elapsed hands over to the
+// Going quiet before the startup wait would have elapsed hands over to the
 // idle timeout rather than leaving the startup timer to fire early.
-func TestDisconnectAfterConnectingUsesTheIdleTimeout(t *testing.T) {
-	w := started(4*quick, 100*quick)
-	begin(w)
-	end(w)
+func TestGoingQuietAfterBeingSeenUsesTheIdleTimeout(t *testing.T) {
+	sc := &fakeSidecar{}
+	w := started(4*quick, 100*quick, sc)
+	sc.up.Store(true)
+	time.Sleep(quick)
+	sc.up.Store(false)
 	if !fired(t, w, 40*quick) {
-		t.Fatal("did not fire on the idle timeout after the sidecar disconnected")
+		t.Fatal("did not fire on the idle timeout after the sidecar went quiet")
 	}
 }
 
-func TestFiresAfterTheLastConnectionCloses(t *testing.T) {
-	w := started(quick, 100*quick)
-	begin(w)
+// This is the regression this redesign exists for: a sidecar that is seen,
+// goes briefly quiet the way daprd's own connection-idling does every ~30
+// minutes against OUR socket, and comes straight back, must not look like a
+// vanished sidecar. The watcher here never even looks at our socket, but the
+// equivalent flap on the signal it does use -- daprd's HTTP port blinking --
+// must behave the same way: the countdown resets rather than accumulating.
+func TestABriefGapWhileStillRunningDoesNotAccumulate(t *testing.T) {
+	sc := &fakeSidecar{}
+	w := started(4*quick, 100*quick, sc)
+	sc.up.Store(true)
+	time.Sleep(quick)
+
+	for range 5 {
+		sc.up.Store(false)
+		time.Sleep(quick) // less than the 4*quick timeout
+		sc.up.Store(true)
+		time.Sleep(quick / 2)
+	}
+
 	if fired(t, w, 2*quick) {
-		t.Fatal("fired while the sidecar was still connected")
+		t.Fatal("fired although the sidecar kept coming back before the timeout")
 	}
-	end(w)
-	if !fired(t, w, 20*quick) {
-		t.Fatal("did not fire after the last connection closed")
-	}
-}
 
-func TestAnotherLiveConnectionKeepsItQuiet(t *testing.T) {
-	w := started(quick, 100*quick)
-	begin(w)
-	begin(w)
-	end(w)
-	if fired(t, w, 4*quick) {
-		t.Fatal("fired while one of two connections was still open")
+	sc.up.Store(false)
+	if !fired(t, w, 40*quick) {
+		t.Fatal("did not fire once the sidecar stayed gone past the timeout")
 	}
 }
 
-// Discovery dials, calls the reflection API, hangs up, and only then does the
-// sidecar connect again to initialise the component. That gap must not count.
-func TestReconnectingDisarmsTheTimer(t *testing.T) {
-	w := started(quick, 100*quick)
-	begin(w)
-	end(w)
-	time.Sleep(quick / 3)
-	begin(w)
-
-	if fired(t, w, 4*quick) {
-		t.Fatal("fired although the sidecar had reconnected")
-	}
-
-	end(w)
-	if !fired(t, w, 20*quick) {
-		t.Fatal("did not fire after the reconnected session closed")
-	}
-}
-
-// End to end over the real thing: a gRPC server on a Unix socket, the watcher
-// installed as its stats handler, and a client that connects and goes away.
-// This is what proves the wiring, not just the bookkeeping.
-func TestFiresWhenARealClientDisconnects(t *testing.T) {
-	// Not t.TempDir(): a Unix socket path is capped at 104 bytes on macOS and
-	// 108 on Linux, and the per-test temporary directory alone overruns that.
-	dir, err := os.MkdirTemp("", "ftpsock")
+// End to end over a real TCP port, proving sidecarRunning itself rather than
+// just the bookkeeping around a fake.
+func TestFiresWhenARealPortStopsAnswering(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("creating a socket directory: %v", err)
+		t.Fatalf("listening: %v", err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-
-	socket := filepath.Join(dir, "ftp.sock")
-	lis, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Fatalf("listening on %s: %v", socket, err)
-	}
-
-	w := started(quick, 100*quick)
-	server := grpc.NewServer(grpc.StatsHandler(w))
-	go func() { _ = server.Serve(lis) }()
-	t.Cleanup(server.Stop)
-
-	conn, err := grpc.NewClient("unix://"+socket, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatalf("creating the client: %v", err)
-	}
-	conn.Connect()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	for conn.GetState() != connectivity.Ready {
-		if !conn.WaitForStateChange(ctx, conn.GetState()) {
-			t.Fatalf("client never reached Ready: %v", ctx.Err())
+	go func() {
+		for {
+			c, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
 		}
+	}()
+
+	_, port, err := net.SplitHostPort(lis.Addr().String())
+	if err != nil {
+		t.Fatalf("splitting %s: %v", lis.Addr(), err)
 	}
+	t.Setenv(daprHTTPPortEnv, port)
+
+	w := newIdleWatcher(quick, 100*quick)
+	w.pollInterval = quick / 10
+	w.Start()
 
 	if fired(t, w, 2*quick) {
-		t.Fatal("fired while the client was connected")
+		t.Fatal("fired while the port was still answering")
 	}
 
-	if err := conn.Close(); err != nil {
-		t.Fatalf("closing the client: %v", err)
+	if err := lis.Close(); err != nil {
+		t.Fatalf("closing the listener: %v", err)
 	}
 	if !fired(t, w, 20*quick) {
-		t.Fatal("did not fire after the client disconnected")
+		t.Fatal("did not fire after the port stopped answering")
+	}
+}
+
+// Guards the zero-value default: an unset port must fall back to 3500, not
+// dial an empty address.
+func TestSidecarRunningDefaultsThePort(t *testing.T) {
+	t.Setenv(daprHTTPPortEnv, "")
+	if sidecarRunning() {
+		t.Skip("something is actually listening on 127.0.0.1:3500 in this environment")
 	}
 }

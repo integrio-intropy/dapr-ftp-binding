@@ -6,10 +6,24 @@ metadata:
     # Dapr 1.11+ can inject this container into pods that set
     # dapr.io/inject-pluggable-components: "true", so it doesn't have to be
     # added to each Deployment's container list by hand.
+    #
+    # -exit-when-idle lets the component exit once daprd goes quiet, so a
+    # Job's pod can reach Succeeded (see the Kubernetes README). It defaults
+    # to on here so a Job or CronJob using this Component needs no extra
+    # annotation; a Deployment's pod turns it off with
+    # ftp-binding.intropy.io/exit-when-idle: "off", mapped below to
+    # FTP_BINDING_EXIT_WHEN_IDLE. See deployment.yaml.
     dapr.io/component-container: >
       {
         "name": "ftp-binding",
         "image": "harbor.intropy.io/platform/dapr-ftp-binding:v0.1.0",
+        "args": ["-exit-when-idle", "30s"],
+        "env": [
+          {
+            "name": "FTP_BINDING_EXIT_WHEN_IDLE",
+            "valueFrom": { "fieldRef": { "fieldPath": "metadata.annotations['ftp-binding.intropy.io/exit-when-idle']" } }
+          }
+        ],
         "volumeMounts": [
           { "name": "dapr-unix-domain-socket", "mountPath": "/tmp/dapr-components-sockets" }
         ],
