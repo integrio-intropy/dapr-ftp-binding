@@ -104,6 +104,10 @@ func main() {
 		log.Warnf("unrecognised log level %q, using info", *logLevel)
 	}
 
+	if limit, ok := setMemoryLimit(os.ReadFile); ok {
+		log.Infof("Go memory limit %d bytes, 80%% of the container's", limit)
+	}
+
 	perm, err := parsePerm(*socketPerm)
 	if err != nil {
 		log.Fatalf("invalid -socket-perm: %v", err)
