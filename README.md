@@ -190,6 +190,14 @@ Two things to keep in mind:
 See [`examples/standalone`](examples/standalone) and
 [`examples/kubernetes`](examples/kubernetes).
 
+**A restarted binding is found again.** daprd connects to a component's socket
+once, while it loads its components, and never reconnects. So when this
+container restarts on its own (an OOM kill, a crash) while daprd keeps running,
+every call would fail until daprd restarted too. At startup the binding checks
+daprd's metadata: if daprd lists `bindings.<socket-name>` but has not called
+`Init` within 10 seconds, the binding asks daprd to shut down
+(`POST /v1.0/shutdown`), and Kubernetes restarts it in the same pod, connected.
+
 
 ## Command-line flags
 

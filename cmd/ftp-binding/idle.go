@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"net"
-	"os"
 	"sync"
 	"time"
 )
@@ -148,10 +147,7 @@ func (w *idleWatcher) fire(reason string) {
 // connections on localhost. That port is up for as long as daprd runs,
 // independent of whether it currently holds a connection to our socket.
 func sidecarRunning() bool {
-	port := os.Getenv(daprHTTPPortEnv)
-	if port == "" {
-		port = defaultDaprHTTPPort
-	}
+	port := daprHTTPPort()
 	//nolint:gosec // G704: the host is the literal "127.0.0.1"; port comes from the
 	// pod's own DAPR_HTTP_PORT, set by the Dapr injector, not external input.
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), dialTimeout)

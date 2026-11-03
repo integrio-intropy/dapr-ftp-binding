@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -235,6 +236,7 @@ func run(log logger.Logger, socketName string, perm os.FileMode, maxMsgSize int,
 	// Starts the poll for daprd's HTTP port. It does not depend on our own
 	// socket being dialable, but there is no reason to start it earlier.
 	idle.Start()
+	go newRejoinWatcher("bindings."+socketName, &reg.initialised).watch(log)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -284,6 +286,9 @@ func socketFolder() string {
 // them. The SDK's version never evicts and never closes.
 type registry struct {
 	log logger.Logger
+	// initialised is set on daprd's first Init, which tells the rejoin watcher
+	// that daprd is connected to this process.
+	initialised atomic.Bool
 
 	mu        sync.Mutex
 	instances map[string]*binding.Binding
@@ -303,13 +308,25 @@ func (r *registry) get(ctx context.Context) sdkbindings.OutputBinding {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if b, ok := r.instances[id]; ok {
-		return b
+	b, ok := r.instances[id]
+	if !ok {
+		b = binding.New(r.log, newDialer)
+		r.instances[id] = b
+		r.log.Debugf("created component instance %q (%d live)", id, len(r.instances))
 	}
-	b := binding.New(r.log, newDialer)
-	r.instances[id] = b
-	r.log.Debugf("created component instance %q (%d live)", id, len(r.instances))
-	return b
+	return trackedBinding{b, &r.initialised}
+}
+
+// trackedBinding records Init calls. Any other call can come from a daprd that
+// reconnected to a restarted process without initialising it again.
+type trackedBinding struct {
+	*binding.Binding
+	initialised *atomic.Bool
+}
+
+func (t trackedBinding) Init(ctx context.Context, meta contribbindings.Metadata) error {
+	t.initialised.Store(true)
+	return t.Binding.Init(ctx, meta)
 }
 
 func (r *registry) closeAll() {
