@@ -92,6 +92,21 @@ func TestFiresWhenTheSidecarIsNeverSeen(t *testing.T) {
 
 // A sidecar seen within the startup wait disarms it for good: from then on
 // only it going quiet plus the idle timeout may fire.
+func TestInitCountsAsASightingOfASidecarThatCameAndWent(t *testing.T) {
+	// A Job whose app finishes at once: daprd called Init and was gone before
+	// the first poll. The idle timeout applies, not the much longer startup wait.
+	sc := &fakeSidecar{}
+	w := newIdleWatcher(quick, time.Hour)
+	w.running = sc.running
+	w.pollInterval = quick / 10
+	w.initialised = &atomic.Bool{}
+	w.initialised.Store(true)
+	w.Start()
+	if !fired(t, w, 3*quick) {
+		t.Fatal("expected the idle timeout to fire after Init, not the hour-long startup wait")
+	}
+}
+
 func TestTheFirstSightingDisarmsTheStartupWait(t *testing.T) {
 	sc := &fakeSidecar{}
 	w := started(100*quick, 2*quick, sc)

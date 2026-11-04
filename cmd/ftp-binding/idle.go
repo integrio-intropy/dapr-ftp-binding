@@ -3,8 +3,8 @@ package main
 import (
 	"fmt"
 	"net"
-	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -48,6 +48,11 @@ type idleWatcher struct {
 	// pollInterval paces the check. A field for the same reason: tests shrink
 	// it so the suite does not take minutes to run the real intervals.
 	pollInterval time.Duration
+	// initialised, when set, is daprd's first Init call to us. It counts as a
+	// sighting: a Job whose app finishes at once has daprd open its HTTP port
+	// and close it again between two polls, and without this the watcher waits
+	// out the whole startup wait for a sidecar that has come and gone.
+	initialised *atomic.Bool
 
 	once sync.Once
 }
@@ -112,6 +117,9 @@ func (w *idleWatcher) watch() {
 	var goneSince time.Time
 
 	for range t.C {
+		if !seen && w.initialised != nil && w.initialised.Load() {
+			seen = true
+		}
 		if w.running() {
 			seen = true
 			goneSince = time.Time{}
@@ -148,10 +156,7 @@ func (w *idleWatcher) fire(reason string) {
 // connections on localhost. That port is up for as long as daprd runs,
 // independent of whether it currently holds a connection to our socket.
 func sidecarRunning() bool {
-	port := os.Getenv(daprHTTPPortEnv)
-	if port == "" {
-		port = defaultDaprHTTPPort
-	}
+	port := daprHTTPPort()
 	//nolint:gosec // G704: the host is the literal "127.0.0.1"; port comes from the
 	// pod's own DAPR_HTTP_PORT, set by the Dapr injector, not external input.
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), dialTimeout)
