@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dapr/components-contrib/metadata"
+	"github.com/dapr/kit/metadata"
 )
 
 // TLSMode selects how the control and data channels are protected.
