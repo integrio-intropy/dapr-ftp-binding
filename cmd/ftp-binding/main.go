@@ -208,8 +208,10 @@ func run(log logger.Logger, socketName string, perm os.FileMode, maxMsgSize int,
 		grpc.MaxRecvMsgSize(maxMsgSize),
 		grpc.MaxSendMsgSize(maxMsgSize),
 	}
+	reg := newRegistry(log)
 	idle := newIdleWatcher(exitWhenIdle, startWait)
 	if idle != nil {
+		idle.initialised = &reg.initialised
 		log.Infof("will exit %s after daprd's HTTP port stops answering", exitWhenIdle)
 		if startWait > 0 {
 			log.Infof("will exit if daprd's HTTP port never answers within %s", startWait)
@@ -217,7 +219,6 @@ func run(log logger.Logger, socketName string, perm os.FileMode, maxMsgSize int,
 	}
 	server := grpc.NewServer(serverOpts...)
 
-	reg := newRegistry(log)
 	sdkbindings.RegisterOutput(server, reg.get)
 
 	// REQUIRED: the Dapr sidecar discovers what a pluggable component implements

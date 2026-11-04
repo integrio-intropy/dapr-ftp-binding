@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -47,6 +48,11 @@ type idleWatcher struct {
 	// pollInterval paces the check. A field for the same reason: tests shrink
 	// it so the suite does not take minutes to run the real intervals.
 	pollInterval time.Duration
+	// initialised, when set, is daprd's first Init call to us. It counts as a
+	// sighting: a Job whose app finishes at once has daprd open its HTTP port
+	// and close it again between two polls, and without this the watcher waits
+	// out the whole startup wait for a sidecar that has come and gone.
+	initialised *atomic.Bool
 
 	once sync.Once
 }
@@ -111,6 +117,9 @@ func (w *idleWatcher) watch() {
 	var goneSince time.Time
 
 	for range t.C {
+		if !seen && w.initialised != nil && w.initialised.Load() {
+			seen = true
+		}
 		if w.running() {
 			seen = true
 			goneSince = time.Time{}
