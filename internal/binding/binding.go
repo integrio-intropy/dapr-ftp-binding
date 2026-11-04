@@ -127,8 +127,8 @@ func (b *Binding) Operations() []bindings.OperationKind {
 }
 
 // GetComponentMetadata describes the metadata fields for tooling.
-func (b *Binding) GetComponentMetadata() map[string]string {
-	m := map[string]string{}
+func (b *Binding) GetComponentMetadata() contribmd.MetadataMap {
+	m := contribmd.MetadataMap{}
 	_ = contribmd.GetMetadataInfoFromStructType(reflect.TypeOf(config.RawType()), &m, contribmd.BindingType)
 	return m
 }
