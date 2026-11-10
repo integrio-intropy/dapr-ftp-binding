@@ -48,11 +48,19 @@ type idleWatcher struct {
 	// pollInterval paces the check. A field for the same reason: tests shrink
 	// it so the suite does not take minutes to run the real intervals.
 	pollInterval time.Duration
-	// initialised, when set, is daprd's first Init call to us. It counts as a
-	// sighting: a Job whose app finishes at once has daprd open its HTTP port
-	// and close it again between two polls, and without this the watcher waits
-	// out the whole startup wait for a sidecar that has come and gone.
-	initialised *atomic.Bool
+	// inits, when set, counts daprd's Init calls to us. Each new one counts as
+	// a sighting and restarts the idle countdown:
+	//   - A Job whose app finishes at once has daprd open its HTTP port and
+	//     close it again between two polls. Without the first Init, the watcher
+	//     waits out the whole startup wait for a sidecar that has come and gone.
+	//   - A daprd that initialised us and then died starting up (another
+	//     pluggable component's socket was not there yet) is restarted in the
+	//     same pod, and the new one calls Init again before it opens its HTTP
+	//     port. Only the first Init counting meant the countdown ran through
+	//     that restart, and a restart slower than the idle timeout made us exit
+	//     under a daprd that had just loaded us. That daprd never dials a new
+	//     socket, so every later call failed with "no such file or directory".
+	inits *atomic.Uint64
 
 	once sync.Once
 }
@@ -115,10 +123,16 @@ func (w *idleWatcher) watch() {
 	start := time.Now()
 	var seen bool
 	var goneSince time.Time
+	var inits uint64
 
 	for range t.C {
-		if !seen && w.initialised != nil && w.initialised.Load() {
-			seen = true
+		if w.inits != nil {
+			if n := w.inits.Load(); n != inits {
+				inits = n
+				seen = true
+				goneSince = time.Time{}
+				continue
+			}
 		}
 		if w.running() {
 			seen = true
