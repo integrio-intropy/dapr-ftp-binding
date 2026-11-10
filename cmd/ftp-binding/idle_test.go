@@ -99,11 +99,42 @@ func TestInitCountsAsASightingOfASidecarThatCameAndWent(t *testing.T) {
 	w := newIdleWatcher(quick, time.Hour)
 	w.running = sc.running
 	w.pollInterval = quick / 10
-	w.initialised = &atomic.Bool{}
-	w.initialised.Store(true)
+	w.inits = &atomic.Uint64{}
+	w.inits.Add(1)
 	w.Start()
 	if !fired(t, w, 3*quick) {
 		t.Fatal("expected the idle timeout to fire after Init, not the hour-long startup wait")
+	}
+}
+
+// A daprd initialises us, dies starting up (another pluggable component's
+// socket was not there yet), and its in-pod restart initialises us again but
+// opens its HTTP port only after the idle timeout counted from the first Init.
+// The second Init must restart the countdown: exiting here leaves the new daprd
+// holding a component whose socket is gone, and every call to it fails.
+func TestASecondInitRestartsTheCountdown(t *testing.T) {
+	sc := &fakeSidecar{}
+	w := newIdleWatcher(4*quick, time.Hour)
+	w.running = sc.running
+	w.pollInterval = quick / 10
+	w.inits = &atomic.Uint64{}
+	w.inits.Add(1) // the first daprd
+	w.Start()
+
+	time.Sleep(3 * quick) // the first daprd is gone, the restart is on its way
+	w.inits.Add(1)        // the restarted daprd calls Init
+	if fired(t, w, 3*quick) {
+		t.Fatal("fired within the idle timeout of the second Init")
+	}
+
+	sc.up.Store(true) // the restarted daprd opens its HTTP port
+	if fired(t, w, 2*quick) {
+		t.Fatal("fired although the restarted daprd is running")
+	}
+
+	sc.up.Store(false)
+	if !fired(t, w, 40*quick) {
+		t.Fatal("did not fire once the restarted daprd stayed gone past the timeout")
 	}
 }
 

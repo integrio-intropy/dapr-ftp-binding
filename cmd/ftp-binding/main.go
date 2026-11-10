@@ -215,7 +215,7 @@ func run(log logger.Logger, socketName string, perm os.FileMode, maxMsgSize int,
 	reg := newRegistry(log)
 	idle := newIdleWatcher(exitWhenIdle, startWait)
 	if idle != nil {
-		idle.initialised = &reg.initialised
+		idle.inits = &reg.inits
 		log.Infof("will exit %s after daprd's HTTP port stops answering", exitWhenIdle)
 		if startWait > 0 {
 			log.Infof("will exit if daprd's HTTP port never answers within %s", startWait)
@@ -294,6 +294,9 @@ type registry struct {
 	// initialised is set on daprd's first Init, which tells the rejoin watcher
 	// that daprd is connected to this process.
 	initialised atomic.Bool
+	// inits counts every Init, which tells the idle watcher that a daprd is
+	// (still, or again) loading this process.
+	inits atomic.Uint64
 
 	mu        sync.Mutex
 	instances map[string]*binding.Binding
@@ -319,7 +322,7 @@ func (r *registry) get(ctx context.Context) sdkbindings.OutputBinding {
 		r.instances[id] = b
 		r.log.Debugf("created component instance %q (%d live)", id, len(r.instances))
 	}
-	return trackedBinding{b, &r.initialised}
+	return trackedBinding{b, &r.initialised, &r.inits}
 }
 
 // trackedBinding records Init calls. Any other call can come from a daprd that
@@ -327,10 +330,12 @@ func (r *registry) get(ctx context.Context) sdkbindings.OutputBinding {
 type trackedBinding struct {
 	*binding.Binding
 	initialised *atomic.Bool
+	inits       *atomic.Uint64
 }
 
 func (t trackedBinding) Init(ctx context.Context, meta contribbindings.Metadata) error {
 	t.initialised.Store(true)
+	t.inits.Add(1)
 	return t.Binding.Init(ctx, meta)
 }
 
