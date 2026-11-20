@@ -32,7 +32,6 @@ spec:
             - name: ftp-binding
               image: harbor.intropy.io/platform/dapr-ftp-binding:v0.1.0
               restartPolicy: Always
-              # No -exit-when-idle: the kubelet stops a native sidecar.
               # daprd reads the socket folder once, at startup. The probe holds
               # daprd and the app back until the binding listens.
               startupProbe:

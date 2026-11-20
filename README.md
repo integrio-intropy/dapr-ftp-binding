@@ -199,10 +199,12 @@ first, starts daprd once the socket exists, and stops both when the app has
 exited. No flags are needed on the binding. See
 [`examples/kubernetes/cronjob.yaml`](examples/kubernetes/cronjob.yaml).
 
-A binding that Dapr injects into a Job needs `-exit-when-idle` instead, because
-nothing else stops it when the app is done. That still works and is described
-in the Kubernetes example, but it has more moving parts: prefer the native
-sidecar where your cluster supports it (Kubernetes 1.29 or later).
+Needs Kubernetes 1.29 or later. Do not let Dapr inject the binding into a Job
+(`dapr.io/inject-pluggable-components: "true"`): Dapr adds it as an ordinary
+container that nothing stops when the app is done, so the pod never completes.
+Earlier versions had `-exit-when-idle` for that case; it was removed in favour
+of the native sidecar, and a binding started with the flag now fails at
+start-up.
 
 ### A restarted binding is found again
 
@@ -232,15 +234,7 @@ the process itself is hosted.
 | `-socket-perm` | `0660` | Permission bits for the socket, **read as octal** whether or not you write the leading zero. |
 | `-max-message-size` | `5242880` | Maximum gRPC message in bytes. Raise alongside the sidecar's `--max-body-size`; |
 | `-log-level` | `info` | `debug`, `info`, `warn` or `error`. |
-| `-exit-when-idle` | `0` (off) | Exit once daprd's HTTP port has answered and then gone quiet for this long. Only for a binding that Dapr injects into a Job or CronJob; see the Kubernetes example. Leave off for Deployments and for a binding that runs as a native sidecar. Overridable per pod with `FTP_BINDING_EXIT_WHEN_IDLE`. |
-| `-exit-when-no-sidecar` | `1m` | With `-exit-when-idle`, also exit if daprd's HTTP port never answers within this long — the case where daprd died before reaching us. `0` waits forever. Ignored without `-exit-when-idle`. |
 | `-version` | | Print the version and exit. |
-
-`FTP_BINDING_EXIT_WHEN_IDLE` overrides `-exit-when-idle` for one pod without a
-second Component resource: a value like `30s` sets the idle timeout, `off`
-disables it, and unset or empty keeps the Component's own default. This is
-what lets a Deployment and a Job share one injected Component — see the
-Kubernetes example.
 
 ## Security
 
