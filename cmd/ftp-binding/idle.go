@@ -19,6 +19,11 @@ import (
 // never completes. Nothing sends us a signal: the kubelet only does that when
 // the pod is being torn down, which is precisely what is not happening.
 //
+// None of this is needed when the pod declares the component itself as a
+// native sidecar: the kubelet stops it once the app has exited. That is the
+// recommended layout for Jobs (examples/kubernetes/cronjob.yaml); this watcher
+// remains for components the injector places.
+//
 // The signal is daprd's HTTP port on localhost, which every container in a pod
 // shares and which daprd listens on for as long as it runs. Our own gRPC
 // socket is NOT a usable signal for this, despite looking like one: grpc-go's

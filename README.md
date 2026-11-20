@@ -138,9 +138,9 @@ directories and uploading again:
       value: "true"
 ```
 
-`POST create` with `fileName: IQPL/DispatchForecast/a.xml` against
-`rootPath: /upload` then issues `MKD /upload/IQPL`, `MKD
-/upload/IQPL/DispatchForecast` and stores the file.
+`POST create` with `fileName: orders/outbound/a.xml` against
+`rootPath: /upload` then issues `MKD /upload/orders`, `MKD
+/upload/orders/outbound` and stores the file.
 
 What this does and does not do:
 
@@ -190,13 +190,35 @@ Two things to keep in mind:
 See [`examples/standalone`](examples/standalone) and
 [`examples/kubernetes`](examples/kubernetes).
 
-**A restarted binding is found again.** daprd connects to a component's socket
-once, while it loads its components, and never reconnects. So when this
-container restarts on its own (an OOM kill, a crash) while daprd keeps running,
+### Jobs and CronJobs: run it as a native sidecar
+
+In a Job, declare the binding yourself as a Kubernetes native sidecar (an init
+container with `restartPolicy: Always`) and let Dapr inject daprd as one too
+(`dapr.io/enable-native-sidecar: "true"`). The kubelet then starts the binding
+first, starts daprd once the socket exists, and stops both when the app has
+exited. No flags are needed on the binding. See
+[`examples/kubernetes/cronjob.yaml`](examples/kubernetes/cronjob.yaml).
+
+A binding that Dapr injects into a Job needs `-exit-when-idle` instead, because
+nothing else stops it when the app is done. That still works and is described
+in the Kubernetes example, but it has more moving parts: prefer the native
+sidecar where your cluster supports it (Kubernetes 1.29 or later).
+
+### A restarted binding is found again
+
+daprd calls `Init` on a component once, while it loads its components. When
+this container restarts on its own (an OOM kill, a crash) while daprd keeps
+running, daprd reconnects to the new socket but never calls `Init` again, so
 every call would fail until daprd restarted too. At startup the binding checks
 daprd's metadata: if daprd lists `bindings.<socket-name>` but has not called
 `Init` within 10 seconds, the binding asks daprd to shut down
 (`POST /v1.0/shutdown`), and Kubernetes restarts it in the same pod, connected.
+
+This needs a pod where daprd is restarted after it exits with code 0: a
+Deployment (`restartPolicy: Always`), or daprd as a native sidecar, which the
+kubelet restarts under any pod restart policy. With an ordinary daprd in a pod
+with `restartPolicy: OnFailure` or `Never`, daprd stays down after the shutdown
+call.
 
 
 ## Command-line flags
@@ -210,15 +232,15 @@ the process itself is hosted.
 | `-socket-perm` | `0660` | Permission bits for the socket, **read as octal** whether or not you write the leading zero. |
 | `-max-message-size` | `5242880` | Maximum gRPC message in bytes. Raise alongside the sidecar's `--max-body-size`; |
 | `-log-level` | `info` | `debug`, `info`, `warn` or `error`. |
-| `-exit-when-idle` | `0` (off) | Exit once daprd's HTTP port has answered and then gone quiet for this long. For Jobs and CronJobs; see the Kubernetes example. Leave off for Deployments. Overridable per pod with `FTP_BINDING_EXIT_WHEN_IDLE`. |
+| `-exit-when-idle` | `0` (off) | Exit once daprd's HTTP port has answered and then gone quiet for this long. Only for a binding that Dapr injects into a Job or CronJob; see the Kubernetes example. Leave off for Deployments and for a binding that runs as a native sidecar. Overridable per pod with `FTP_BINDING_EXIT_WHEN_IDLE`. |
 | `-exit-when-no-sidecar` | `1m` | With `-exit-when-idle`, also exit if daprd's HTTP port never answers within this long — the case where daprd died before reaching us. `0` waits forever. Ignored without `-exit-when-idle`. |
 | `-version` | | Print the version and exit. |
 
 `FTP_BINDING_EXIT_WHEN_IDLE` overrides `-exit-when-idle` for one pod without a
 second Component resource: a value like `30s` sets the idle timeout, `off`
 disables it, and unset or empty keeps the Component's own default. This is
-what lets a Deployment and a Job share one Component — see the Kubernetes
-example.
+what lets a Deployment and a Job share one injected Component — see the
+Kubernetes example.
 
 ## Security
 

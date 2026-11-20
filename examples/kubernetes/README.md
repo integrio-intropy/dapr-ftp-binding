@@ -21,6 +21,45 @@ the main README.
 
 ## Jobs and CronJobs
 
+Run the binding and daprd as Kubernetes native sidecars: init containers with
+`restartPolicy: Always`. [`cronjob.yaml`](cronjob.yaml) is a complete example.
+
+```bash
+kubectl apply -f component.yaml
+kubectl apply -f cronjob.yaml
+```
+
+What the pod needs:
+
+1. The binding declared under `initContainers` with `restartPolicy: Always`
+   and a startup probe on its socket.
+2. `dapr.io/enable-native-sidecar: "true"`, so Dapr injects daprd as a native
+   sidecar. The injector appends daprd to `initContainers`, after the binding.
+3. `dapr.io/inject-pluggable-components: "false"`, because the pod brings the
+   binding itself.
+4. An `emptyDir` volume for the socket folder, mounted in the binding and
+   given to daprd with `dapr.io/volume-mounts`.
+
+The kubelet then does the rest:
+
+- **Start order.** daprd starts only when the binding's startup probe has
+  passed, so it finds the socket on its first start. daprd reads the socket
+  folder once, and an injected binding usually loses that race: daprd exits
+  with `couldn't find binding` and has to be restarted.
+- **Completion.** When the app container exits, the kubelet stops daprd and
+  the binding. The pod's result is the app's exit code. The binding needs no
+  `-exit-when-idle`, and the app does not need to call `/v1.0/shutdown`.
+- **Restarts.** A native sidecar is restarted whatever the pod's
+  `restartPolicy`, so `Never` is fine for the Job.
+
+Needs Kubernetes 1.29 or later. The image and arguments now live in the
+workload instead of on the Component; keep them equal to the
+`dapr.io/component-container` annotation if Deployments use that.
+
+### If the binding is injected into a Job instead
+
+Use this only where native sidecars are not available.
+
 A pod is only `Succeeded` once **every** container has terminated, and the Dapr
 injector adds pluggable components to `spec.containers`. So a Job whose app
 finishes its work and shuts the sidecar down still has this component running,
@@ -94,4 +133,6 @@ then take the component down with it. Two ways to avoid that:
 
   A pod without the annotation (a Job) falls through to the Component's own
   `-exit-when-idle`; one with it set to `off` disables idle-exit for that pod
-  alone. See `component.yaml` and `deployment.yaml` for the full wiring.
+  alone. `component.yaml` and `deployment.yaml` here do not carry this wiring:
+  add the `args` and `env` above to the `dapr.io/component-container`
+  annotation, and the annotation to the Deployment's pod template.
