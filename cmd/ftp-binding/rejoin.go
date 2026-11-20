@@ -135,6 +135,13 @@ func (md *daprMetadata) has(componentType string) bool {
 	return false
 }
 
+// daprHTTPPortEnv is how the Dapr injector tells every container in the pod
+// which port daprd's HTTP API listens on.
+const daprHTTPPortEnv = "DAPR_HTTP_PORT"
+
+// defaultDaprHTTPPort is what the injector uses when it has not overridden it.
+const defaultDaprHTTPPort = "3500"
+
 func daprHTTPPort() string {
 	if port := os.Getenv(daprHTTPPortEnv); port != "" {
 		return port
