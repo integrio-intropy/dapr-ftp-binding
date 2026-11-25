@@ -3,9 +3,11 @@ package ftpclient
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/textproto"
 	"sync/atomic"
 	"time"
 
@@ -145,7 +147,33 @@ func (c *jlConn) Store(ctx context.Context, remotePath string, r io.Reader) erro
 	}
 	// StorFrom already joins the data-connection close error with the server's
 	// post-transfer status, so no status is lost here.
-	return c.end(c.sc.Stor(remotePath, r))
+	return c.end(acceptClosingReply(c.sc.Stor(remotePath, r)))
+}
+
+// acceptClosingReply drops a 250 closing reply from the error the library
+// returns after a data transfer (LIST, RETR, STOR).
+//
+// RFC 959 allows 226 or 250 once a transfer ends, and some servers (IBM i, for
+// one) send 250. jlaffaye/ftp v0.2.4 accepts only 226 (checkDataShut), so the
+// transfer succeeds but comes back joined with a *textproto.Error carrying 250.
+//
+// The library reports the closing reply only inside an errors.Join, so only
+// joined members are considered: a bare 250, such as an unexpected reply to the
+// command itself, is left alone. Any other joined error is kept.
+func acceptClosingReply(err error) error {
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		return err
+	}
+	var rest []error
+	for _, e := range joined.Unwrap() {
+		var tp *textproto.Error
+		if errors.As(e, &tp) && tp.Code == ftp.StatusRequestedFileActionOK {
+			continue
+		}
+		rest = append(rest, e)
+	}
+	return errors.Join(rest...)
 }
 
 func (c *jlConn) Retrieve(ctx context.Context, remotePath string, w io.Writer) (int64, error) {
@@ -165,7 +193,7 @@ func (c *jlConn) Retrieve(ctx context.Context, remotePath string, w io.Writer) (
 	// Response.Close carries the server's post-transfer status. Discarding it
 	// makes a transfer that failed server-side look successful, which is the
 	// defect the upstream contrib PR shipped.
-	closeErr := resp.Close()
+	closeErr := acceptClosingReply(resp.Close())
 
 	if copyErr != nil {
 		// We stopped reading early, so the session state is undefined.
@@ -204,7 +232,7 @@ func (c *jlConn) List(ctx context.Context, remotePath string) ([]Entry, error) {
 		return nil, err
 	}
 	entries, err := c.sc.List(remotePath)
-	if err != nil {
+	if err = acceptClosingReply(err); err != nil {
 		return nil, c.end(err)
 	}
 	out := make([]Entry, 0, len(entries))
