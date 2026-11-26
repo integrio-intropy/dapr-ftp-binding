@@ -4,12 +4,12 @@ go 1.27.2
 
 require (
 	github.com/dapr-sandbox/components-go-sdk v0.3.0
-	github.com/dapr/components-contrib v1.19.0
-	github.com/dapr/kit v0.18.2
-	github.com/fclairamb/ftpserverlib v0.32.4
+	github.com/dapr/components-contrib v1.19.2
+	github.com/dapr/kit v0.19.0
+	github.com/fclairamb/ftpserverlib v0.33.3
 	github.com/jlaffaye/ftp v0.2.4
 	github.com/spf13/afero v1.15.0
-	google.golang.org/grpc v1.84.0
+	google.golang.org/grpc v1.85.0
 )
 
 require (
@@ -23,10 +23,11 @@ require (
 	github.com/spf13/cast v1.8.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/net v0.61.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260727163830-6c54dddc4772 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260817212433-ac3dfec99bb1 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	k8s.io/apimachinery v0.33.0 // indirect
 )
